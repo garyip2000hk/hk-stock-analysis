@@ -1,0 +1,521 @@
+{
+  "01428": [
+    {
+      "date": "2025-09-23",
+      "type": "general_offer",
+      "title": "螞蟻集團獲證監會批准成為耀才主要股東"
+    },
+    {
+      "date": "2026-03-15",
+      "type": "general_offer",
+      "title": "螞蟻集團要約收購獲內地當局批准，所有完成條件達成"
+    },
+    {
+      "date": "2026-03-16",
+      "type": "general_offer",
+      "title": "短暫停牌 — 待公布螞蟻集團收購內地批准"
+    },
+    {
+      "date": "2026-03-17",
+      "type": "general_offer",
+      "title": "聯合公告：完成條件達成，螞蟻提潛在無條件強制性現金要約，恢復買賣"
+    },
+    {
+      "date": "2026-03-31",
+      "type": "general_offer",
+      "title": "螞蟻集團完成收購50.55%股權，提強制性現金要約每股$3.28"
+    },
+    {
+      "date": "2026-04-08",
+      "type": "general_offer",
+      "title": "獨立財務顧問建議獨立股東不接納螞蟻要約（要約價折讓大）"
+    },
+    {
+      "date": "2026-04-09",
+      "type": "director_change",
+      "title": "董事會重組：主席變動、委任行政總裁及聯席行政總裁"
+    },
+    {
+      "date": "2026-04-10",
+      "type": "director_change",
+      "title": "辭任執行董事，新董事委任"
+    },
+    {
+      "date": "2026-04-30",
+      "type": "general_offer",
+      "title": "131萬股接納要約，螞蟻持股升至50.63%"
+    }
+  ],
+  "08619": [
+    {
+      "date": "2025-08-01",
+      "type": "清盤呈請",
+      "type_en": "Winding-up Petition",
+      "detail": "被中潤企業財務提起清盤呈請，8月1日起復牌",
+      "status": "withdrawn"
+    },
+    {
+      "date": "2025-09-03",
+      "type": "和解",
+      "type_en": "Settlement",
+      "detail": "已與呈請人簽訂和解協議",
+      "status": "completed"
+    },
+    {
+      "date": "2025-09-30",
+      "type": "清盤呈請撤銷",
+      "type_en": "Winding-up Withdrawn",
+      "detail": "清盤呈請已被撤回",
+      "status": "completed"
+    },
+    {
+      "date": "2025-10-31",
+      "type": "收購",
+      "type_en": "Acquisition",
+      "detail": "擬750萬港元收購Smart Building Management System Limited 60%股權",
+      "status": "proposed"
+    },
+    {
+      "date": "2026-01-30",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "detail": "擬「1供2」基準供股",
+      "status": "proposed"
+    },
+    {
+      "date": "2026-02-11",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "detail": "一供二，供股價HK$0.107，除權日2026/04/22，供股期2026/05/06-05/13，截止2026/05/18，最後付款2026/06/10",
+      "status": "completed"
+    }
+  ],
+  "08083": [
+    {
+      "date": "2025-06-10",
+      "type": "cb",
+      "title": "發行可換股債券"
+    },
+    {
+      "date": "2025-08-15",
+      "type": "placing",
+      "title": "根據一般授權配售新股份"
+    }
+  ],
+  "08360": [],
+  "01329": [],
+  "08491": [],
+  "08179": [],
+  "00659": [
+    {
+      "date": "2023-06-27",
+      "type": "全面收購/要約",
+      "type_en": "General Offer",
+      "detail": "周大福企業提出全面現金要約收購新創建，每股作價HK$9.15（溢價14.5%），最高現金金額約355.12億港元",
+      "status": "completed"
+    },
+    {
+      "date": "2024-12-19",
+      "type": "改名",
+      "type_en": "Name Change",
+      "detail": "新創建集團正式改名為周大福創建有限公司 (CTF Services Limited)",
+      "status": "completed"
+    },
+    {
+      "date": "2025-07-11",
+      "type": "可換股債券",
+      "type_en": "CB",
+      "detail": "發行2027年到期8.5億港元2.80%可換股債券，初始換股價HK$7.67（溢價2%），集資淨額約8.43億元",
+      "status": "completed"
+    },
+    {
+      "date": "2025-09-25",
+      "type": "送紅股",
+      "type_en": "Bonus Issue",
+      "detail": "推出「十送一」紅股計劃，旨在擴大股本基礎，提升股份流通性",
+      "status": "completed"
+    },
+    {
+      "date": "2025-12-09",
+      "type": "送紅股",
+      "type_en": "Bonus Issue",
+      "detail": "完成發行4.06億股紅股",
+      "status": "completed"
+    },
+    {
+      "date": "2026-03-06",
+      "type": "CB轉換",
+      "type_en": "CB Conversion",
+      "detail": "因轉換CB發行3139.01萬股轉換股份（本金2.1億港元）",
+      "status": "completed"
+    },
+    {
+      "date": "2026-03-10",
+      "type": "回購/贖回",
+      "type_en": "Buyback",
+      "detail": "完成購回5.66億元現有CB（佔初始本金約72.6%），餘下7400萬元悉數轉換為股份",
+      "status": "completed"
+    }
+  ],
+  "00001": [],
+  "00256": [
+    {
+      "date": "05/05/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "三供一",
+      "price": "0.1",
+      "ex_date": "20/05/2026",
+      "rights_period": "29/06/2026至07/07/2026",
+      "payment_deadline": "10/07/2026",
+      "distribution_date": "29/07/2026",
+      "detail": "三供一，供股價港元 0.1",
+      "source": "etnet"
+    }
+  ],
+  "00397": [
+    {
+      "date": "29/04/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.038",
+      "ex_date": "27/05/2026",
+      "rights_period": "09/06/2026至16/06/2026",
+      "payment_deadline": "22/06/2026",
+      "distribution_date": "30/07/2026",
+      "detail": "二供一，供股價港元 0.038",
+      "source": "etnet"
+    }
+  ],
+  "08178": [
+    {
+      "date": "21/04/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.18",
+      "ex_date": "01/06/2026",
+      "rights_period": "15/06/2026至23/06/2026",
+      "payment_deadline": "26/06/2026",
+      "distribution_date": "31/07/2026",
+      "detail": "二供一，供股價港元 0.18",
+      "source": "etnet"
+    }
+  ],
+  "02699": [
+    {
+      "date": "22/04/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供六",
+      "price": "4.7",
+      "ex_date": "04/06/2026",
+      "rights_period": "17/06/2026至25/06/2026",
+      "payment_deadline": "30/06/2026",
+      "distribution_date": "03/08/2026",
+      "detail": "合併後一供六，供股價港元 4.7",
+      "source": "etnet"
+    }
+  ],
+  "01676": [
+    {
+      "date": "05/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.19",
+      "ex_date": "15/06/2026",
+      "rights_period": "29/06/2026至07/07/2026",
+      "payment_deadline": "10/07/2026",
+      "distribution_date": "04/08/2026",
+      "detail": "二供一，供股價港元 0.19",
+      "source": "etnet"
+    }
+  ],
+  "08096": [
+    {
+      "date": "27/04/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供三",
+      "price": "0.1",
+      "ex_date": "16/06/2026",
+      "rights_period": "30/06/2026至08/07/2026",
+      "payment_deadline": "13/07/2026",
+      "distribution_date": "06/08/2026",
+      "detail": "二供三，供股價港元 0.1",
+      "source": "etnet"
+    }
+  ],
+  "01826": [
+    {
+      "date": "29/05/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.1",
+      "ex_date": "25/06/2026",
+      "rights_period": "09/07/2026至16/07/2026",
+      "payment_deadline": "21/07/2026",
+      "distribution_date": "06/08/2026",
+      "detail": "二供一，供股價港元 0.1",
+      "source": "etnet"
+    }
+  ],
+  "01942": [
+    {
+      "date": "21/05/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.065",
+      "ex_date": "30/06/2026",
+      "rights_period": "30/07/2026至06/08/2026",
+      "payment_deadline": "11/08/2026",
+      "distribution_date": "03/09/2026",
+      "detail": "二供一，供股價港元 0.065",
+      "source": "etnet"
+    }
+  ],
+  "00776": [
+    {
+      "date": "22/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.19",
+      "ex_date": "06/07/2026",
+      "rights_period": "31/07/2026至07/08/2026",
+      "payment_deadline": "12/08/2026",
+      "distribution_date": "02/09/2026",
+      "detail": "二供一，供股價港元 0.19",
+      "source": "etnet"
+    }
+  ],
+  "08611": [
+    {
+      "date": "16/02/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供一",
+      "price": "0.6",
+      "ex_date": "07/07/2026",
+      "rights_period": "20/07/2026至27/07/2026",
+      "payment_deadline": "30/07/2026",
+      "distribution_date": "27/08/2026",
+      "detail": "一供一，供股價港元 0.6",
+      "source": "etnet"
+    }
+  ],
+  "01355": [
+    {
+      "date": "24/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.068",
+      "ex_date": "24/07/2026",
+      "rights_period": "06/08/2026至13/08/2026",
+      "payment_deadline": "18/08/2026",
+      "distribution_date": "08/09/2026",
+      "detail": "二供一，供股價港元 0.068",
+      "source": "etnet"
+    }
+  ],
+  "01792": [
+    {
+      "date": "17/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供三",
+      "price": "0.81",
+      "ex_date": "31/07/2026",
+      "rights_period": "13/08/2026至20/08/2026",
+      "payment_deadline": "25/08/2026",
+      "distribution_date": "16/09/2026",
+      "detail": "一供三，供股價港元 0.81",
+      "source": "etnet"
+    }
+  ],
+  "01822": [
+    {
+      "date": "18/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供一",
+      "price": "0.077",
+      "ex_date": "05/08/2026",
+      "rights_period": "18/08/2026至25/08/2026",
+      "payment_deadline": "28/08/2026",
+      "distribution_date": "15/09/2026",
+      "detail": "一供一，供股價港元 0.077",
+      "source": "etnet"
+    }
+  ],
+  "00073": [
+    {
+      "date": "15/06/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供三",
+      "price": "1.38",
+      "ex_date": "10/08/2026",
+      "rights_period": "21/08/2026至28/08/2026",
+      "payment_deadline": "02/09/2026",
+      "distribution_date": "22/09/2026",
+      "detail": "一供三，供股價港元 1.38",
+      "source": "etnet"
+    }
+  ],
+  "01079": [
+    {
+      "date": "16/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供一",
+      "price": "0.15",
+      "ex_date": "12/08/2026",
+      "rights_period": "27/08/2026至03/09/2026",
+      "payment_deadline": "08/09/2026",
+      "distribution_date": "15/09/2026",
+      "detail": "二供一，供股價港元 0.15",
+      "source": "etnet"
+    }
+  ],
+  "08121": [
+    {
+      "date": "10/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供四",
+      "price": "0.36",
+      "ex_date": "17/08/2026",
+      "rights_period": "28/08/2026至04/09/2026",
+      "payment_deadline": "09/09/2026",
+      "distribution_date": "28/09/2026",
+      "detail": "一供四，供股價港元 0.36",
+      "source": "etnet"
+    }
+  ],
+  "08291": [
+    {
+      "date": "09/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供三",
+      "price": "0.2",
+      "ex_date": "18/08/2026",
+      "rights_period": "31/08/2026至07/09/2026",
+      "payment_deadline": "10/09/2026",
+      "distribution_date": "29/09/2026",
+      "detail": "一供三，供股價港元 0.2",
+      "source": "etnet"
+    }
+  ],
+  "06610": [
+    {
+      "date": "15/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供四",
+      "price": "0.6",
+      "ex_date": "19/08/2026",
+      "rights_period": "01/09/2026至08/09/2026",
+      "payment_deadline": "11/09/2026",
+      "distribution_date": "07/10/2026",
+      "detail": "一供四，供股價港元 0.6",
+      "source": "etnet"
+    }
+  ],
+  "08027": [
+    {
+      "date": "13/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供二",
+      "price": "0.1",
+      "ex_date": "25/08/2026",
+      "rights_period": "07/09/2026至14/09/2026",
+      "payment_deadline": "17/09/2026",
+      "distribution_date": "14/10/2026",
+      "detail": "一供二，供股價港元 0.1",
+      "source": "etnet"
+    }
+  ],
+  "02211": [
+    {
+      "date": "17/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供四",
+      "price": "0.4",
+      "ex_date": "26/08/2026",
+      "rights_period": "08/09/2026至15/09/2026",
+      "payment_deadline": "18/09/2026",
+      "distribution_date": "06/10/2026",
+      "detail": "一供四，供股價港元 0.4",
+      "source": "etnet"
+    }
+  ],
+  "00730": [
+    {
+      "date": "14/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供一",
+      "price": "6.25",
+      "ex_date": "03/09/2026",
+      "rights_period": "14/09/2026至21/09/2026",
+      "payment_deadline": "24/09/2026",
+      "distribution_date": "06/10/2026",
+      "detail": "合併後一供一，供股價港元 6.25",
+      "source": "etnet"
+    }
+  ],
+  "00913": [
+    {
+      "date": "26/05/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "二供三",
+      "price": "0.14",
+      "ex_date": "07/09/2026",
+      "rights_period": "18/09/2026至25/09/2026",
+      "payment_deadline": "30/09/2026",
+      "distribution_date": "30/10/2026",
+      "detail": "二供三，供股價港元 0.14",
+      "source": "etnet"
+    }
+  ],
+  "01991": [
+    {
+      "date": "04/02/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供二",
+      "price": "0.8",
+      "ex_date": "08/09/2026",
+      "rights_period": "21/09/2026至28/09/2026",
+      "payment_deadline": "02/10/2026",
+      "distribution_date": "09/10/2026",
+      "detail": "一供二，供股價港元 0.8",
+      "source": "etnet"
+    }
+  ],
+  "00928": [
+    {
+      "date": "23/07/2026",
+      "type": "供股",
+      "type_en": "Rights Issue",
+      "ratio": "一供二",
+      "price": "0.5",
+      "ex_date": "09/09/2026",
+      "rights_period": "22/09/2026至29/09/2026",
+      "payment_deadline": "05/10/2026",
+      "distribution_date": "26/10/2026",
+      "detail": "合併後一供二，供股價港元 0.5",
+      "source": "etnet"
+    }
+  ]
+}
