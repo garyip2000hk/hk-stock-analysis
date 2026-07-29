@@ -172,46 +172,32 @@ def top_changes(stocks, days_back=7):
     return all_changes[:30]
 
 def corp_actions(stock_code, months=12):
-    """Scrape HKEX announcements for corporate actions."""
-    try:
-        params = {
-            'sortDir': '0', 'sortByOptions': 'DateTime',
-            'category': '0', 'market': 'SEHK',
-            'stockId': stock_code,
-            'documentType': '-1', 'fromDate': '',
-            'toDate': '', 'title': '', 'searchType': '0',
-            't1code': '-2', 't2Gcode': '-2', 't2code': '-2',
-            'rowRange': '50', 'lang': 'EN',
-        }
-        resp = SESSION.post(HKEXNEWS_URL, data=params, timeout=30)
-        data = resp.json()
-    except:
+    """Read corporate actions from local cache file."""
+    
+    # Normalize stock code to 5 digits
+    code = str(stock_code).zfill(5)
+    
+    # Find cache file relative to this script
+    import os as _os
+    _cache_dir = _os.path.dirname(_os.path.abspath(__file__))
+    _cache_path = _os.path.join(_cache_dir, 'corp_actions_cache.json')
+    
+    if not _os.path.exists(_cache_path):
         return []
-
-    events = []
-    for row in data[:100]:
-        title = row.get('title', '') or row.get('TITLE', '')
-        date_str = row.get('date', '') or row.get('DATE', '')
-        doc_type = row.get('headlineCategoryCode', '') or row.get('HEADLINECATEGORYCODE', '')
-
-        if not title: continue
-
-        # Detect corporate action type
-        action_types = []
-        for action_type, keywords in CORP_ACTION_KEYWORDS.items():
-            for kw in keywords:
-                if kw.lower() in title.lower():
-                    action_types.append(action_type)
-                    break
-
-        if action_types:
-            events.append({
-                'date': date_str,
-                'title': title.strip(),
-                'action_types': action_types,
-                'doc_type': doc_type,
-            })
-
+    
+    try:
+        with open(_cache_path, 'r', encoding='utf-8') as f:
+            cache = json.load(f)
+    except Exception:
+        return []
+    
+    events = cache.get(code, [])
+    
+    # Filter by months if needed
+    if months and months < 120:
+        cutoff = datetime.now() - timedelta(days=months * 30)
+        events = [e for e in events if e.get('date', '') and e['date'] >= cutoff.strftime('%Y-%m-%d')]
+    
     return events
 
 def generate_chart(data, stock_code, output_path):
