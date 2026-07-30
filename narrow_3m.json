@@ -1,0 +1,7 @@
+{
+  "scan_date": "2026-07-29 13:03",
+  "total_scanned": 0,
+  "narrow_found": 0,
+  "condition": "drop >= 50% + 3-month range <= 20%",
+  "stocks": []
+}

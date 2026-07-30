@@ -51,62 +51,94 @@ def _cell_val(cell):
     body = cell.find('div', class_='mobile-list-body')
     return body.get_text(strip=True) if body else cell.get_text(strip=True)
 
-def fetch_stock(stock_code, date_str=None):
+def fetch_stock(stock_code, date_str=None, max_retries=5):
+    start_d = None
     if date_str is None:
-        d = datetime.now()
-        while d.weekday() >= 5: d -= timedelta(days=1)
-        date_str = d.strftime('%Y/%m/%d')
+        start_d = datetime.now()
     else:
-        # Clean input format (handles YYYYMMDD, YYYY/MM/DD, YYYY-MM-DD)
         clean = date_str.replace('-', '').replace('/', '')
         if len(clean) == 8:
-            date_str = f"{clean[:4]}/{clean[4:6]}/{clean[6:]}"
-            # Adjust weekend dates to last trading day (Friday)
             try:
-                d = datetime.strptime(clean, '%Y%m%d')
-                while d.weekday() >= 5:
-                    d -= timedelta(days=1)
-                date_str = d.strftime('%Y/%m/%d')
+                start_d = datetime.strptime(clean, '%Y%m%d')
             except:
-                pass
+                start_d = datetime.now()
+        else:
+            start_d = datetime.now()
 
-    resp = SESSION.get(CCASS_URL, timeout=30)
-    fields = _get_ccass_form(resp.text)
-    form = {**fields, 'txtShareholdingDate': date_str, 'txtStockCode': stock_code, 'btnSearch': '搜尋'}
-    resp = SESSION.post(CCASS_URL, data=form, timeout=30)
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    for attempt in range(max_retries):
+        d = start_d - timedelta(days=attempt)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+            start_d = d  # keep sync
+        
+        current_date_str = d.strftime('%Y/%m/%d')
+        
+        try:
+            resp = SESSION.get(CCASS_URL, timeout=30)
+            fields = _get_ccass_form(resp.text)
+            form = {**fields, 'txtShareholdingDate': current_date_str, 'txtStockCode': stock_code, 'btnSearch': '搜尋'}
+            
+            resp = SESSION.post(CCASS_URL, data=form, timeout=30)
+            soup = BeautifulSoup(resp.text, 'html.parser')
 
-    err = soup.find(id='lblErrorMsg')
-    if err and err.text.strip():
-        return {'error': err.text.strip(), 'stock_code': stock_code, 'date': date_str}
+            err = soup.find(id='lblErrorMsg')
+            if err and err.text.strip():
+                if attempt == max_retries - 1:
+                    return {'error': err.text.strip(), 'stock_code': stock_code, 'date': current_date_str}
+                continue # try previous day
 
-    table = soup.find('table', class_='table-mobile-list')
-    if not table:
-        return {'error': 'No data', 'stock_code': stock_code, 'date': date_str}
+            table = soup.find('table', class_='table-mobile-list')
+            if not table:
+                if attempt == max_retries - 1:
+                    return {'error': 'No data', 'stock_code': stock_code, 'date': current_date_str}
+                continue # try previous day
 
-    participants = []
-    for row in table.find_all('tr')[1:]:
-        cells = row.find_all('td')
-        if len(cells) < 4: continue
+            participants = []
+            for row in table.find_all('tr')[1:]:
+                cells = row.find_all('td')
+                if len(cells) < 4: continue
+                
+                id_val = _cell_val(cells[0])
+                name = _cell_val(cells[1])
+                addr = _cell_val(cells[2])
+                shares_str = _cell_val(cells[3]).replace(',', '').strip()
+                percent_str = _cell_val(cells[4]).replace('%', '').strip()
+                
+                try:
+                    shares = int(shares_str)
+                    percent = float(percent_str)
+                except ValueError:
+                    continue
+                    
+                participants.append({
+                    'id': id_val,
+                    'name': name,
+                    'shares': shares,
+                    'percentage': percent
+                })
+                
+            if not participants:
+                if attempt == max_retries - 1:
+                    return {'error': 'No participant data', 'stock_code': stock_code, 'date': current_date_str}
+                continue
 
-        pid = _cell_val(cells[0])
-        name = _cell_val(cells[1])
-        shares_str = _cell_val(cells[3]).replace(',', '')
-        pct_str = _cell_val(cells[4]).replace('%', '').strip()
-
-        try: shares = int(shares_str)
-        except: shares = 0
-        try: pct = float(pct_str)
-        except: pct = 0.0
-
-        participants.append({
-            'id': pid, 'name': name, 'shares': shares, 'percentage': pct,
-        })
-
-    return {
-        'stock_code': stock_code, 'date': date_str,
-        'participants': participants, 'total': len(participants),
-    }
+            summary = soup.find('div', class_='ccass-search-summary')
+            total_shares = 0
+            if summary:
+                nums = re.findall(r'[\d,]+', summary.text)
+                if nums:
+                    total_shares = int(nums[-1].replace(',', ''))
+                    
+            return {
+                'date': current_date_str,
+                'stock_code': stock_code,
+                'total_participants': len(participants),
+                'total_shares': total_shares,
+                'participants': participants
+            }
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return {'error': str(e), 'stock_code': stock_code, 'date': current_date_str}
 
 def analyze(data, top_n=20):
     if 'error' in data: return data

@@ -1,0 +1,16 @@
+{
+  "last_updated": "2026-07-29T12:00:00.000Z",
+  "concentration_top": [
+    { "stock_code": "01428", "top_5_pct": 79.36, "top_10_pct": 87.86 },
+    { "stock_code": "08619", "top_5_pct": 71.4, "top_10_pct": 85.1 },
+    { "stock_code": "08083", "top_5_pct": 65.2, "top_10_pct": 78.4 },
+    { "stock_code": "00001", "top_5_pct": 50.1, "top_10_pct": 62.3 },
+    { "stock_code": "00659", "top_5_pct": 24.5, "top_10_pct": 33.1 }
+  ],
+  "movement_top": [
+    { "stock_code": "01428", "max_increase_pct": 4.5 },
+    { "stock_code": "08619", "max_increase_pct": 2.1 },
+    { "stock_code": "00659", "max_increase_pct": 0.8 },
+    { "stock_code": "00001", "max_increase_pct": 0.3 }
+  ]
+}

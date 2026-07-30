@@ -1,0 +1,5 @@
+Loaded 488 stocks from cache
+Dropped >=50%: 0 stocks
+
+=== DONE ===
+Scanned: 0 | Narrow range found: 0
