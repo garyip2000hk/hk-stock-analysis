@@ -4,6 +4,7 @@ import sys, json, os
 sys.path.insert(0, os.path.dirname(__file__))
 from ccass_analyzer import fetch_stock
 from color_tracker import analyze_color_tracking
+from hybrid_ccass_pipeline import local_range_snapshot
 
 def main():
     if len(sys.argv) < 4:
@@ -55,20 +56,25 @@ def main():
         pass
 
     data_points = []
-    for ds in dates:
-        ck = f"{stock}_{ds}"
-        if ck in cache:
-            data = cache[ck]
-        else:
-            data = fetch_stock(stock, ds)
-            cache[ck] = data
+    local = local_range_snapshot(stock, from_date.replace('/', '-'), to_date.replace('/', '-'))
+    if local and len(local.get('snapshots', [])) >= 2:
+        for snapshot in local['snapshots']:
+            data_points.append({'date': snapshot['date'], 'stock_code': stock, 'participants': snapshot['participants']})
+    else:
+        for ds in dates:
+            ck = f"{stock}_{ds}"
+            if ck in cache:
+                data = cache[ck]
+            else:
+                data = fetch_stock(stock, ds)
+                cache[ck] = data
 
-        if not data.get('error') and data.get('participants'):
-            data_points.append({
-                'date': ds,
-                'stock_code': stock,
-                'participants': data['participants']
-            })
+            if not data.get('error') and data.get('participants'):
+                data_points.append({
+                    'date': ds,
+                    'stock_code': stock,
+                    'participants': data['participants']
+                })
 
     with open(cache_path, 'w') as f:
         json.dump(cache, f, ensure_ascii=False)
@@ -78,6 +84,7 @@ def main():
         return
 
     result = analyze_color_tracking(data_points)
+    result['source'] = 'local' if local and len(local.get('snapshots', [])) >= 2 else 'web'
     print(json.dumps(result, ensure_ascii=False))
 
 
