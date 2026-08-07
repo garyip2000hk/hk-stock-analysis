@@ -61,23 +61,8 @@ def main():
         for snapshot in local['snapshots']:
             data_points.append({'date': snapshot['date'], 'stock_code': stock, 'participants': snapshot['participants']})
     else:
-        for ds in dates:
-            ck = f"{stock}_{ds}"
-            if ck in cache:
-                data = cache[ck]
-            else:
-                data = fetch_stock(stock, ds)
-                cache[ck] = data
-
-            if not data.get('error') and data.get('participants'):
-                data_points.append({
-                    'date': ds,
-                    'stock_code': stock,
-                    'participants': data['participants']
-                })
-
-    with open(cache_path, 'w') as f:
-        json.dump(cache, f, ensure_ascii=False)
+        # Local-only: skip web scraping to keep dashboard fast
+        pass
 
     if len(data_points) < 2:
         print(json.dumps({"error": f"Not enough data points ({len(data_points)})"}, ensure_ascii=False))

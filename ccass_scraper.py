@@ -24,11 +24,8 @@ BASE_URL = "https://www3.hkexnews.hk/sdw/search/searchsdw.aspx"
 def _get_form_fields(html):
     soup = BeautifulSoup(html, 'html.parser')
     fields = {}
-    for name in ['__VIEWSTATE', '__VIEWSTATEGENERATOR', '__EVENTVALIDATION', 'today',
-                  'sortBy', 'sortDirection']:
-        el = soup.find('input', {'name': name})
-        if el:
-            fields[name] = el['value']
+    for el in soup.select('input[type="hidden"][name]'):
+        fields[el['name']] = el.get('value', '')
     return fields
 
 
@@ -49,11 +46,24 @@ def fetch_ccass(stock_code, date_str=None):
     # Step 1: GET the page
     resp = SESSION.get(BASE_URL, timeout=30)
     fields = _get_form_fields(resp.text)
+    if resp.url != BASE_URL:
+        base_url = resp.url
+    else:
+        base_url = BASE_URL
 
     # Step 2: POST with search params
-    form_data = {**fields, 'txtShareholdingDate': date_str,
-                  'txtStockCode': stock_code, 'btnSearch': '搜尋'}
-    resp = SESSION.post(BASE_URL, data=form_data, timeout=30)
+    form_data = {
+        **fields,
+        'txtShareholdingDate': date_str,
+        'txtStockCode': str(stock_code).zfill(5),
+        'txtStockName': '',
+        'txtParticipantID': '',
+        'txtParticipantName': '',
+        'txtSelPartID': '',
+        '__EVENTTARGET': 'btnSearch',
+        '__EVENTARGUMENT': '',
+    }
+    resp = SESSION.post(base_url, data=form_data, headers={'Referer': base_url}, timeout=30)
 
     return _parse_ccass(resp.text, stock_code, date_str)
 
@@ -69,9 +79,9 @@ def _cell_value(cell):
 def _parse_ccass(html, stock_code, date_str):
     soup = BeautifulSoup(html, 'html.parser')
 
-    error = soup.find(id='lblErrorMsg')
-    if error and error.text.strip():
-        return {'error': error.text.strip(), 'stock_code': stock_code, 'date': date_str}
+    alert = soup.find(id='alertMsg')
+    if alert and alert.get('value', '').strip():
+        return {'error': alert.get('value').strip(), 'stock_code': stock_code, 'date': date_str}
 
     table = soup.find('table', class_='table-mobile-list')
     if not table:
@@ -80,19 +90,24 @@ def _parse_ccass(html, stock_code, date_str):
     rows = table.find_all('tr')
     participants = []
 
+    def labelled_value(cell):
+        text = cell.get_text(' ', strip=True)
+        if ':' in text:
+            text = text.split(':', 1)[1]
+        return text.strip()
+
     for row in rows[1:]:
         cells = row.find_all('td')
-        if len(cells) < 4:
+        if len(cells) < 5:
             continue
 
-        pid = _cell_value(cells[0])
-        name_raw = cells[1].get_text(strip=True)
-        name = _cell_value(cells[1])
-        consent = '*' in name_raw[:70]
-        address = _cell_value(cells[2])
-        shares_str = _cell_value(cells[3]).replace(',', '')
-        pct_str = _cell_value(cells[4]).replace('%', '').strip()
-
+        pid = labelled_value(cells[0])
+        name_raw = labelled_value(cells[1])
+        name = name_raw.replace('*', '').strip()
+        consent = '*' in cells[1].get_text(' ', strip=True)
+        address = labelled_value(cells[2])
+        shares_str = labelled_value(cells[3]).replace(',', '')
+        pct_str = labelled_value(cells[4]).replace('%', '').strip()
         try:
             shares = int(shares_str)
         except (ValueError, TypeError):

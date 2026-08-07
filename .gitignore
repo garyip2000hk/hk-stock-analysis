@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.json
+!zosite.json
+!package.json
+!tsconfig.json
+options_data/
+imported/
+*.log
