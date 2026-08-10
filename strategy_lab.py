@@ -98,13 +98,23 @@ def generate_data():
                 })
                 
             # Process Individual Stocks
-            target_stocks = {'700': '騰訊控股', '9988': '阿里巴巴', '3690': '美團', '388': '香港交易所', '5': '匯豐控股'}
-            for sym, name in target_stocks.items():
+# Process Individual Stocks dynamically
+            # 找出市場上所有牛熊證數量 > 10 的 Underlying (忽略 HSI)
+            stk_counts = df[df['un'] != 'HSI']['un'].value_counts()
+            active_stocks = stk_counts[stk_counts > 10].index.tolist()
+            
+            # Helper to map name (fallback to symbol if unknown)
+            name_map = {'700': '騰訊控股', '9988': '阿里巴巴', '3690': '美團', '388': '香港交易所', '5': '匯豐控股', '1299': '友邦保險', '941': '中國移動', '2318': '中國平安', '1211': '比亞迪', '1810': '小米集團', '981': '中芯國際', '883': '中國海洋石油'}
+            
+            for sym in active_stocks:
+                sym_str = str(sym)
+                name = name_map.get(sym_str, f"股票 {sym_str}")
+                
                 stk_df = df[df['un'] == sym].copy()
                 if stk_df.empty:
                     continue
                     
-                spot_price = get_spot_price(sym, today_str)
+                spot_price = get_spot_price(sym_str, today_str)
                 if not spot_price:
                     spot_price = stk_df['cprice_num'].median()
                     
@@ -112,7 +122,8 @@ def generate_data():
                 zone_step = max(0.5, round(spot_price * 0.02 * 2) / 2) # e.g. 300 -> 6, 70 -> 1.5
                 if spot_price > 200: zone_step = 5.0
                 elif spot_price > 50: zone_step = 2.0
-                else: zone_step = 1.0
+                elif spot_price > 10: zone_step = 0.5
+                else: zone_step = 0.1
                 
                 stk_df['zone'] = (stk_df['cprice_num'] // zone_step) * zone_step
                 
