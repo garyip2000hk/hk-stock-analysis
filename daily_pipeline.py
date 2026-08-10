@@ -37,6 +37,17 @@ def run():
         report["sections"]["import"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
+
+    # 1b. CBBC & Warrants Data
+    print("\n[1b/13] CBBC & Warrants Data...")
+    try:
+        import cbbc_warrants_importer
+        cbbc_warrants_importer.sync_data()
+        report["sections"]["cbbc_warrants"] = {"status": "ok"}
+    except Exception as e:
+        report["sections"]["cbbc_warrants"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
     # 2. Corporate Actions
     print("\n[2/11] Corporate Actions...")
     try:
