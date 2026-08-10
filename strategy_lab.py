@@ -60,78 +60,97 @@ def generate_data():
             if not hsi_df.empty:
                 spot_price = get_spot_price('HSI', today_str)
                 if not spot_price:
-                    # fallback to median of cprice if yfinance fails
                     spot_price = hsi_df['cprice_num'].median()
                 
-                # 恆指用 100 點區間
                 hsi_df['zone'] = (hsi_df['cprice_num'] // 100) * 100
-                
-                # 過濾超過 1200 點
                 hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= 1200]
                 
-                # 重熊區 (Bear)
                 bear_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
                 heavy_bear_zone = 0
                 heavy_bear_qu = 0
                 if not bear_df.empty:
-                    bear_grouped = bear_df.groupby('zone')['qu_num'].sum().reset_index()
-                    heavy_bear_row = bear_grouped.loc[bear_grouped['qu_num'].idxmax()]
-                    heavy_bear_zone = heavy_bear_row['zone']
-                    heavy_bear_qu = round(heavy_bear_row['qu_num'], 2)
-                    
-                # 重牛區 (Bull)
+                    qu_sum = bear_df.groupby('zone')['qu_num'].sum()
+                    if not qu_sum.empty:
+                        heavy_bear_zone = float(qu_sum.idxmax())
+                        heavy_bear_qu = float(qu_sum.max())
+                        
                 bull_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bull|牛', case=False, na=False)]
                 heavy_bull_zone = 0
                 heavy_bull_qu = 0
                 if not bull_df.empty:
-                    bull_grouped = bull_df.groupby('zone')['qu_num'].sum().reset_index()
-                    heavy_bull_row = bull_grouped.loc[bull_grouped['qu_num'].idxmax()]
-                    heavy_bull_zone = heavy_bull_row['zone']
-                    heavy_bull_qu = round(heavy_bull_row['qu_num'], 2)
-                    
+                    qu_sum = bull_df.groupby('zone')['qu_num'].sum()
+                    if not qu_sum.empty:
+                        heavy_bull_zone = float(qu_sum.idxmax())
+                        heavy_bull_qu = float(qu_sum.max())
+                        
                 squeeze_list.append({
                     "symbol": "HSI",
                     "name": "恆生指數",
                     "spot_price": spot_price,
-                    "ccass_concentration": 75.5, # Placeholder for Index
+                    "ccass_concentration": 75.5,
                     "heavy_bear_zone": heavy_bear_zone,
                     "heavy_bear_qu": heavy_bear_qu,
                     "heavy_bull_zone": heavy_bull_zone,
                     "heavy_bull_qu": heavy_bull_qu,
                     "iv_spike": 12.5,
-                    "score": 70 if heavy_bear_qu > 100 else 45,
-                    "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 200 else "WATCH"
+                    "score": 70 if heavy_bull_qu > 100 or heavy_bear_qu > 100 else 40,
+                    "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 150 else "WATCH"
                 })
                 
-            # Process a few top stocks
-            top_stocks = ['00700', '09988', '03690']
-            for stk in top_stocks:
-                stk_df = df[df['un'] == stk].copy()
-                if not stk_df.empty:
-                    spot_price = get_spot_price(stk, today_str)
-                    if not spot_price:
-                        spot_price = stk_df['cprice_num'].median()
+            # Process Individual Stocks
+            target_stocks = {'700': '騰訊控股', '9988': '阿里巴巴', '3690': '美團', '388': '香港交易所', '5': '匯豐控股'}
+            for sym, name in target_stocks.items():
+                stk_df = df[df['un'] == sym].copy()
+                if stk_df.empty:
+                    continue
+                    
+                spot_price = get_spot_price(sym, today_str)
+                if not spot_price:
+                    spot_price = stk_df['cprice_num'].median()
+                    
+                # For stocks, use dynamic zone (approx 2% of price, rounded to nice number)
+                zone_step = max(0.5, round(spot_price * 0.02 * 2) / 2) # e.g. 300 -> 6, 70 -> 1.5
+                if spot_price > 200: zone_step = 5.0
+                elif spot_price > 50: zone_step = 2.0
+                else: zone_step = 1.0
+                
+                stk_df['zone'] = (stk_df['cprice_num'] // zone_step) * zone_step
+                
+                # Filter stocks beyond 15% distance
+                stk_df = stk_df[abs(stk_df['zone'] - spot_price) / spot_price <= 0.15]
+                
+                bear_df = stk_df[stk_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
+                heavy_bear_zone = 0
+                heavy_bear_qu = 0
+                if not bear_df.empty:
+                    qu_sum = bear_df.groupby('zone')['qu_num'].sum()
+                    if not qu_sum.empty:
+                        heavy_bear_zone = float(qu_sum.idxmax())
+                        heavy_bear_qu = float(qu_sum.max())
                         
-                    # 個股不需要 100 點區間，可以直接用 cprice_num 分組，或者 0.5 點
-                    stk_df['zone'] = (stk_df['cprice_num'] // 0.5) * 0.5
-                    
-                    bear_df = stk_df[stk_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
-                    heavy_bear_zone = bear_df.groupby('zone')['qu_num'].sum().idxmax() if not bear_df.empty else 0
-                    
-                    bull_df = stk_df[stk_df['cp'].astype(str).str.contains('Bull|牛', case=False, na=False)]
-                    heavy_bull_zone = bull_df.groupby('zone')['qu_num'].sum().idxmax() if not bull_df.empty else 0
-                    
-                    squeeze_list.append({
-                        "symbol": stk,
-                        "name": stk,
-                        "spot_price": spot_price,
-                        "ccass_concentration": round(75 + np.random.rand() * 10, 1),
-                        "heavy_bear_zone": heavy_bear_zone,
-                        "heavy_bull_zone": heavy_bull_zone,
-                        "iv_spike": round(5 + np.random.rand() * 10, 1),
-                        "score": round(50 + np.random.rand() * 30, 1),
-                        "signal": "WATCH"
-                    })
+                bull_df = stk_df[stk_df['cp'].astype(str).str.contains('Bull|牛', case=False, na=False)]
+                heavy_bull_zone = 0
+                heavy_bull_qu = 0
+                if not bull_df.empty:
+                    qu_sum = bull_df.groupby('zone')['qu_num'].sum()
+                    if not qu_sum.empty:
+                        heavy_bull_zone = float(qu_sum.idxmax())
+                        heavy_bull_qu = float(qu_sum.max())
+                        
+                squeeze_list.append({
+                    "symbol": sym.zfill(5) if sym != 'HSI' else sym,
+                    "name": name,
+                    "spot_price": spot_price,
+                    "ccass_concentration": 0, # Placeholder until CCASS connected
+                    "heavy_bear_zone": heavy_bear_zone,
+                    "heavy_bear_qu": heavy_bear_qu,
+                    "heavy_bull_zone": heavy_bull_zone,
+                    "heavy_bull_qu": heavy_bull_qu,
+                    "iv_spike": 0,
+                    "score": 60 if heavy_bull_qu > 10 else 30,
+                    "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 20 else "WATCH"
+                })
+
                     
         except Exception as e:
             print(f"Error reading CBBC: {e}")
