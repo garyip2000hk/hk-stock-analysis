@@ -3,74 +3,147 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import yfinance as yf
 
 OUT_PATH = "/home/workspace/stock-analysis/options_data/strategy_lab.json"
 CBBC_DIR = "/home/workspace/Desktop/db/CBBC"
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+
+SPOT_DIR = "/home/workspace/Desktop/db/Spot"
+
+def get_spot_price(symbol, today_str):
+    try:
+        # First try from local Spot CSV
+        spot_file = os.path.join(SPOT_DIR, f"spot_{today_str}.parquet")
+        if os.path.exists(spot_file):
+            spot_df = pd.read_parquet(spot_file)
+            
+            # Match symbol. The spot_df has 'Underlying' column
+            # In spot_df, HSI is 'HSI', '700' is '700'
+            # Our input symbol is 'HSI' or '00700'
+            search_sym = symbol
+            if symbol != 'HSI':
+                search_sym = str(int(symbol)) # '00700' -> '700'
+                
+            row = spot_df[spot_df['Underlying'].astype(str) == search_sym]
+            if not row.empty:
+                return float(row['現價'].iloc[0])
+                
+        # Fallback to yfinance if not found
+        if symbol == 'HSI':
+            ticker = '^HSI'
+        else:
+            ticker = f"{symbol.zfill(4)}.HK"
+        data = yf.Ticker(ticker).history(period="1d")
+        if not data.empty:
+            return round(data['Close'].iloc[-1], 2)
+    except Exception as e:
+        print(f"Error fetching spot for {symbol}: {e}")
+    return None
 
 def generate_data():
     today_str = datetime.now().strftime("%Y%m%d")
     cbbc_file = os.path.join(CBBC_DIR, f"cbbc_{today_str}.parquet")
     
     squeeze_list = []
-    market_maker_list = []
-    volatility_list = []
-    event_trap_list = []
     
-    try:
-        df = pd.read_parquet(cbbc_file)
-        underlyings = df['un'].dropna().unique()
-        issuers = df['issuer'].dropna().unique()
-        
-        for un in underlyings[:8]:
-            sym_str = str(un)
-            name = sym_str if sym_str != 'HSI' else '恆生指數'
+    if os.path.exists(cbbc_file):
+        try:
+            df = pd.read_parquet(cbbc_file)
             
-            # Helper to parse price
-            price_val = 100
-            try:
-                raw_price = df[df['un']==un]['cprice'].iloc[0]
-                if isinstance(raw_price, str):
-                    price_val = float(raw_price.replace(',', ''))
-                else:
-                    price_val = float(raw_price)
-            except:
-                pass
+            # Clean cprice and qu
+            df['cprice_num'] = df['cprice'].astype(str).str.replace(',', '').astype(float)
+            df['qu_num'] = pd.to_numeric(df['qu'], errors='coerce').fillna(0)
+            
+            # Process HSI
+            hsi_df = df[df['un'] == 'HSI'].copy()
+            if not hsi_df.empty:
+                spot_price = get_spot_price('HSI', today_str)
+                if not spot_price:
+                    # fallback to median of cprice if yfinance fails
+                    spot_price = hsi_df['cprice_num'].median()
                 
-            squeeze_list.append({
-                "symbol": sym_str,
-                "name": name,
-                "ccass_concentration": round(75 + np.random.rand() * 15, 2),
-                "heavy_bear_zone": round(price_val * 1.05, 2),
-                "heavy_bull_zone": round(price_val * 0.95, 2),
-                "iv_spike": round(5 + np.random.rand() * 20, 2),
-                "score": round(60 + np.random.rand() * 35, 1),
-                "signal": "STRONG_SQUEEZE" if np.random.rand() > 0.5 else "WATCH"
-            })
+                # 恆指用 100 點區間
+                hsi_df['zone'] = (hsi_df['cprice_num'] // 100) * 100
+                
+                # 過濾超過 1200 點
+                hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= 1200]
+                
+                # 重熊區 (Bear)
+                bear_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
+                heavy_bear_zone = 0
+                heavy_bear_qu = 0
+                if not bear_df.empty:
+                    bear_grouped = bear_df.groupby('zone')['qu_num'].sum().reset_index()
+                    heavy_bear_row = bear_grouped.loc[bear_grouped['qu_num'].idxmax()]
+                    heavy_bear_zone = heavy_bear_row['zone']
+                    heavy_bear_qu = round(heavy_bear_row['qu_num'], 2)
+                    
+                # 重牛區 (Bull)
+                bull_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bull|牛', case=False, na=False)]
+                heavy_bull_zone = 0
+                heavy_bull_qu = 0
+                if not bull_df.empty:
+                    bull_grouped = bull_df.groupby('zone')['qu_num'].sum().reset_index()
+                    heavy_bull_row = bull_grouped.loc[bull_grouped['qu_num'].idxmax()]
+                    heavy_bull_zone = heavy_bull_row['zone']
+                    heavy_bull_qu = round(heavy_bull_row['qu_num'], 2)
+                    
+                squeeze_list.append({
+                    "symbol": "HSI",
+                    "name": "恆生指數",
+                    "spot_price": spot_price,
+                    "ccass_concentration": 75.5, # Placeholder for Index
+                    "heavy_bear_zone": heavy_bear_zone,
+                    "heavy_bear_qu": heavy_bear_qu,
+                    "heavy_bull_zone": heavy_bull_zone,
+                    "heavy_bull_qu": heavy_bull_qu,
+                    "iv_spike": 12.5,
+                    "score": 70 if heavy_bear_qu > 100 else 45,
+                    "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 200 else "WATCH"
+                })
+                
+            # Process a few top stocks
+            top_stocks = ['00700', '09988', '03690']
+            for stk in top_stocks:
+                stk_df = df[df['un'] == stk].copy()
+                if not stk_df.empty:
+                    spot_price = get_spot_price(stk, today_str)
+                    if not spot_price:
+                        spot_price = stk_df['cprice_num'].median()
+                        
+                    # 個股不需要 100 點區間，可以直接用 cprice_num 分組，或者 0.5 點
+                    stk_df['zone'] = (stk_df['cprice_num'] // 0.5) * 0.5
+                    
+                    bear_df = stk_df[stk_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
+                    heavy_bear_zone = bear_df.groupby('zone')['qu_num'].sum().idxmax() if not bear_df.empty else 0
+                    
+                    bull_df = stk_df[stk_df['cp'].astype(str).str.contains('Bull|牛', case=False, na=False)]
+                    heavy_bull_zone = bull_df.groupby('zone')['qu_num'].sum().idxmax() if not bull_df.empty else 0
+                    
+                    squeeze_list.append({
+                        "symbol": stk,
+                        "name": stk,
+                        "spot_price": spot_price,
+                        "ccass_concentration": round(75 + np.random.rand() * 10, 1),
+                        "heavy_bear_zone": heavy_bear_zone,
+                        "heavy_bull_zone": heavy_bull_zone,
+                        "iv_spike": round(5 + np.random.rand() * 10, 1),
+                        "score": round(50 + np.random.rand() * 30, 1),
+                        "signal": "WATCH"
+                    })
+                    
+        except Exception as e:
+            print(f"Error reading CBBC: {e}")
             
-            market_maker_list.append({
-                "symbol": sym_str,
-                "name": name,
-                "issuer": issuers[0] if len(issuers) > 0 else "JPM",
-                "stock_trend": "DOWN" if np.random.rand() > 0.5 else "UP",
-                "ccass_change": f"{'+' if np.random.rand() > 0.5 else '-'}{round(np.random.rand() * 5, 2)}M",
-                "cbbc_retail_flow": "HEAVY_BULL" if np.random.rand() > 0.5 else "HEAVY_BEAR",
-                "shadow_signal": "HEDGING_TRAP" if np.random.rand() > 0.5 else "NORMAL_HEDGE",
-                "action": "AVOID_LONG" if np.random.rand() > 0.5 else "FOLLOW"
-            })
-            
-    except Exception as e:
-        print(f"Error reading CBBC: {e}")
-        
-    volatility_list = [
-        {"symbol": "09988", "name": "阿里巴巴", "ccass_concentration": 85.2, "iv_percentile": 5.4, "current_iv": 28.5, "recommendation": "LONG_STRADDLE"},
-        {"symbol": "03690", "name": "美團", "ccass_concentration": 82.1, "iv_percentile": 8.1, "current_iv": 35.2, "recommendation": "LONG_STRANGLE"},
-        {"symbol": "00700", "name": "騰訊控股", "ccass_concentration": 78.4, "iv_percentile": 12.3, "current_iv": 25.1, "recommendation": "LONG_STRANGLE"}
+    market_maker_list = [
+        {"symbol": "00388", "name": "香港交易所", "issuer": "JPM", "stock_trend": "DOWN", "ccass_change": "-4.5M", "cbbc_retail_flow": "HEAVY_BULL", "shadow_signal": "HEDGING_TRAP", "action": "AVOID_LONG"}
     ]
-    
+    volatility_list = [
+        {"symbol": "09988", "name": "阿里巴巴", "ccass_concentration": 85.2, "iv_percentile": 5.4, "current_iv": 28.5, "recommendation": "LONG_STRANGLE"}
+    ]
     event_trap_list = [
-        {"symbol": "00005", "name": "匯豐控股", "event": "業績公佈", "event_date": "2026-08-15", "ccass_flow": "DISTRIBUTING", "options_retail": "CALL_SKEW", "trap_prob": 88.5, "recommendation": "IRON_CONDOR"},
-        {"symbol": "00388", "name": "香港交易所", "event": "業績公佈", "event_date": "2026-08-20", "ccass_flow": "ACCUMULATING", "options_retail": "PUT_SKEW", "trap_prob": 76.2, "recommendation": "BULL_PUT_SPREAD"}
+        {"symbol": "00005", "name": "匯豐控股", "event": "業績公佈", "event_date": "2026-08-15", "ccass_flow": "DISTRIBUTING", "options_retail": "CALL_SKEW", "trap_prob": 88.5, "recommendation": "IRON_CONDOR"}
     ]
     
     output = {
