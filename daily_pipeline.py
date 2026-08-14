@@ -42,10 +42,32 @@ def run():
     print("\n[1b/13] CBBC & Warrants Data...")
     try:
         import cbbc_warrants_importer
-        cbbc_warrants_importer.sync_data()
-        report["sections"]["cbbc_warrants"] = {"status": "ok"}
+        cbbc_sync = cbbc_warrants_importer.sync_data()
+        report["sections"]["cbbc_warrants"] = {
+            "status": "ok" if cbbc_sync["cbbc"]["status"] == "fresh" else "degraded",
+            "datasets": cbbc_sync,
+        }
     except Exception as e:
         report["sections"]["cbbc_warrants"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 1c. Stereoscopic market strategies must still be refreshed when CBBC falls back to a prior snapshot.
+    print("\n[1c/13] Stereoscopic Market Strategies...")
+    try:
+        import strategy_lab
+        strategy_data = strategy_lab.generate_data()
+        report["sections"]["strategy_lab"] = {
+            "status": "ok" if strategy_data["data_freshness"]["cbbc"] == "fresh" else "degraded",
+            "data_freshness": strategy_data["data_freshness"],
+            "counts": {
+                "squeeze_radar": len(strategy_data["squeeze_radar"]),
+                "market_maker_shadow": len(strategy_data["market_maker_shadow"]),
+                "volatility_breakout": len(strategy_data["volatility_breakout"]),
+                "event_trap": len(strategy_data["event_trap"]),
+            },
+        }
+    except Exception as e:
+        report["sections"]["strategy_lab"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
     # 2. Corporate Actions

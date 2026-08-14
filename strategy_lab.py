@@ -3,10 +3,12 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
 import yfinance as yf
 import sys
 sys.path.append('/home/workspace/stock-analysis')
 import ccass_local
+from cbbc_warrants_importer import find_latest_snapshot
 
 OUT_PATH = "/home/workspace/stock-analysis/options_data/strategy_lab.json"
 CBBC_DIR = "/home/workspace/Desktop/db/CBBC"
@@ -56,7 +58,11 @@ def get_spot_price(symbol, today_str):
 
 def generate_data():
     today_str = datetime.now().strftime("%Y%m%d")
-    cbbc_file = os.path.join(CBBC_DIR, f"cbbc_{today_str}.parquet")
+    expected_cbbc_file = os.path.join(CBBC_DIR, f"cbbc_{today_str}.parquet")
+    fallback_cbbc_file = find_latest_snapshot(CBBC_DIR, "cbbc")
+    cbbc_file = Path(expected_cbbc_file) if os.path.exists(expected_cbbc_file) else fallback_cbbc_file
+    cbbc_status = "fresh" if cbbc_file and str(cbbc_file) == expected_cbbc_file else ("stale" if cbbc_file else "missing")
+    cbbc_source_date = cbbc_file.stem.removeprefix("cbbc_") if cbbc_file else None
     
     # Load supporting data
     ccass_cross = load_json("ccass_options_cross.json") or []
@@ -74,7 +80,7 @@ def generate_data():
     
     name_map = {'700': '騰訊控股', '9988': '阿里巴巴', '3690': '美團', '388': '香港交易所', '5': '匯豐控股', '1299': '友邦保險', '941': '中國移動', '2318': '中國平安', '1211': '比亞迪', '1810': '小米集團', '981': '中芯國際', '883': '中國海洋石油'}
     
-    if os.path.exists(cbbc_file):
+    if cbbc_file:
         try:
             df = pd.read_parquet(cbbc_file)
             df['cprice_num'] = df['cprice'].astype(str).str.replace(',', '').astype(float)
@@ -204,6 +210,8 @@ def generate_data():
 
         except Exception as e:
             print(f"Error reading CBBC: {e}")
+    else:
+        print("⚠️ No CBBC snapshot is available; generating non-CBBC strategy sections only.")
             
     # --- 3. Volatility Breakout (波幅突破尋寶) ---
     # Find stocks with high concentration (> 70) and extremely low IV percentile (< 25)
@@ -265,6 +273,11 @@ def generate_data():
 
     output = {
         "updated_at": datetime.now().isoformat(),
+        "data_freshness": {
+            "cbbc": cbbc_status,
+            "cbbc_source_date": cbbc_source_date,
+            "cbbc_source_path": str(cbbc_file) if cbbc_file else None,
+        },
         "squeeze_radar": squeeze_list,
         "market_maker_shadow": market_maker_list,
         "volatility_breakout": volatility_list,
@@ -274,6 +287,7 @@ def generate_data():
     with open(OUT_PATH, 'w', encoding='utf-8') as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"✅ Generated stereoscopic strategy data at {OUT_PATH}")
+    return output
 
 if __name__ == "__main__":
     generate_data()
