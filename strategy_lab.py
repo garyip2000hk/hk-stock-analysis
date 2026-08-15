@@ -92,7 +92,7 @@ def generate_data():
             if not hsi_df.empty:
                 spot_price = get_spot_price('HSI', today_str) or hsi_df['cprice_num'].median()
                 hsi_df['zone'] = (hsi_df['cprice_num'] // 100) * 100
-                hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= 1200]
+                hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= 600]
                 
                 bear_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
                 qu_sum = bear_df.groupby('zone')['qu_num'].sum() if not bear_df.empty else pd.Series()
@@ -136,7 +136,7 @@ def generate_data():
                 else: zone_step = 0.1
                 
                 stk_df['zone'] = (stk_df['cprice_num'] // zone_step) * zone_step
-                stk_df = stk_df[abs(stk_df['zone'] - spot_price) / spot_price <= 0.15]
+                stk_df = stk_df[abs(stk_df['zone'] - spot_price) / spot_price <= 0.08]
                 
                 bear_df = stk_df[stk_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
                 qu_sum = bear_df.groupby('zone')['qu_num'].sum() if not bear_df.empty else pd.Series()
