@@ -43,49 +43,10 @@ def run():
     print("\n[1b/15] CCASS Coverage Gap Check...")
     try:
         import ccass_gap_check
-        import io, contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            import sys as _sys
-            _argv = _sys.argv
-            _sys.argv = ["ccass_gap_check.py", "--days", "45", "--json"]
-            try:
-                ccass_gap_check.main()
-            finally:
-                _sys.argv = _argv
-        import json as _json
-        gap = _json.loads(buf.getvalue())
-        report["sections"]["ccass_coverage"] = gap
-        if gap["status"] == "GAP":
-            print(f"  ⚠ 缺 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
-        else:
-            print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
-    except Exception as e:
-        report["sections"]["ccass_coverage"] = {"status": "error", "error": str(e)}
-        print(f"  ✗ {e}")
-
-    # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
-    print("\n[1b/15] CCASS Coverage Gap Check...")
-    try:
-        import ccass_gap_check
         gap = ccass_gap_check.check(days=45)
         report["sections"]["ccass_coverage"] = gap
         if gap["status"] == "GAP":
             print(f"  ⚠ 缺少 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
-        else:
-            print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
-    except Exception as e:
-        report["sections"]["ccass_coverage"] = {"status": "error", "error": str(e)}
-        print(f"  ✗ {e}")
-
-    # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
-    print("\n[1b/15] CCASS Coverage Gap Check...")
-    try:
-        import ccass_gap_check
-        gap = ccass_gap_check.check(days=45)
-        report["sections"]["ccass_coverage"] = gap
-        if gap["status"] == "GAP":
-            print(f"  ⚠ 缺 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
         else:
             print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
     except Exception as e:
