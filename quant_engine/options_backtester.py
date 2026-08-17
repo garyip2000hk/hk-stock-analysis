@@ -14,10 +14,21 @@ IV、成交、未平倉。全部由 HKEX 官方日報拆出，唔係模型價。
 非期權標的做期權策略冇意義，所以唔會出現喺呢個引擎。
 
 損益計法：
-  - 開倉用當日結算價（賣收 credit、買付 debit）
-  - 平倉用平倉日同一合約嘅結算價（真實市價，唔係模型重估）
+  - 開倉用當日結算價（賣收 credit、買付 debit）**再扣每腿滑價**
+  - 平倉用平倉日同一合約嘅結算價（真實市價，唔係模型重估）**再扣滑價**
   - 每張合約 × contract_size（每手股數）換成港元
-  - 扣佣金 HK$20/腿 + 交易所費用（約 HK$3/張）
+  - 扣佣金 HK$8 + 交易所 HK$3 + 徵費 HK$0.6，每張每腿每次
+
+⚠ 為咩要滑價（2026-08-17 補）：
+HKEX 日報嘅 settle 係**結算價**，交易所用嚟計保證金嘅理論價，
+通常比真實可成交價更靠中。之前呢個引擎只扣固定手續費，等於假設
+每一腿都成交喺中價 —— 對多腿賣方結構特別致命：4 腿開平共跨 8 次價差，
+每腿只食中價 3% 就已經蒸發 ~12% credit，剛好等於 MIN_CREDIT_RATIO
+全部門檻。所以滑價唔係「保守一點」，佢決定策略存唔存在。
+
+到期用內在值結算嘅腿**唔收滑價**（結算價係交易所定，冇價差要跨），
+只有真正喺市場平倉嘅腿才跨價差。呢個分別會令 HOLD_TO_EXPIRY=True
+嘅結果比 False 少一半滑價，係真實嘅。
 
 Tier 標準同股票策略唔同：期權賣方策略勝率天然高、回報細，
 所以 tier 主要睇 Sharpe + 平均風險回報 + 最壞單筆。
@@ -26,6 +37,8 @@ CLI:
     python3 options_backtester.py                    # 跑全部策略
     python3 options_backtester.py --strategy short_put
     python3 options_backtester.py --limit 20
+    python3 options_backtester.py --slippage 0.03
+    python3 options_backtester.py --sensitivity      # 0/1/3/5% 每腿滑價
 """
 
 from __future__ import annotations
@@ -45,6 +58,7 @@ ROOT = BASE.parent
 sys.path.insert(0, str(ROOT))
 
 import bs  # noqa: E402
+import costs  # noqa: E402
 
 CHAIN = ROOT / "options_data" / "chain_history.parquet"
 SPECS = ROOT / "options_data" / "contract_specs.json"
@@ -79,6 +93,9 @@ MIN_CREDIT_RATIO = 0.12       # 收 credit 嘅結構:淨收入／翼寬低過呢
                               # 所以會做大量「收 $0.05、賭 $2.00」嘅負期望倉。
 PARITY_MIN_EDGE_PCT = 0.01    # parity 偏離要大過現價幾 % 才做
 STOCK_FEE_PCT = 0.0018        # 股票腿單邊成本（印花稅 0.1% + 佣金／交易費 ≈ 0.08%）
+SLIPPAGE_PER_LEG = 0.03       # 每腿滑價（結算價比例）。同 condor_engine 同一口徑,
+                              # 由 costs.CostModel 實作,兩個引擎唔會各有一套算法。
+                              # 想由 Futu 實測 bid/ask 反推就用 costs.from_measured_spreads()
 
 
 # ───────────────────────── 數據 ─────────────────────────
@@ -530,9 +547,26 @@ def _risk_per_contract(legs: list[dict], spot: float, contract_size: int) -> flo
     return max(naive, floor)
 
 
+def _fill(mid: float, action: str, cm) -> float:
+    """單腿成交價。action = 'sell'（我賣出，收 bid）或 'buy'（我買入，付 ask）。
+
+    直接用 costs.CostModel，同 condor_engine 共用同一套算法。
+    """
+    side = "short" if action == "sell" else "long"
+    return cm.fill(costs.Leg(mid=max(float(mid), 0.0), side=side), action)
+
+
 def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
-                 contract_size: int) -> list[dict]:
-    """單隻標的、單個策略 — 逐 STEP_DAYS 開一次倉，跟到平倉。"""
+                 contract_size: int, cm=None) -> list[dict]:
+    """單隻標的、單個策略 — 逐 STEP_DAYS 開一次倉，跟到平倉。
+
+    cm = costs.CostModel；None 就用 SLIPPAGE_PER_LEG 造一個。
+    佣金／交易所費仍然由下面 per_leg 港元口徑處理（CostModel 只負責滑價），
+    避免同一筆費用計兩次。
+    """
+    if cm is None:
+        cm = costs.CostModel(slippage_per_leg=SLIPPAGE_PER_LEG,
+                             commission_per_leg=0.0)
     days = sorted(chain.date.unique())
     trades: list[dict] = []
 
@@ -569,13 +603,19 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                 iv0 = mk.iv.iloc[0] if not mk.empty else None
                 L["iv"] = float(iv0) if iv0 is not None and pd.notna(iv0) else None
 
-        # 開倉現金流（每股）
+        # 開倉現金流（每股）。open_cf_mid = 中價口徑，用嚟量化滑價蒸發咗幾多。
         open_cf = 0.0
+        open_cf_mid = 0.0
         n_contracts = 0
         for L in legs:
             q = L.get("qty", 1)
             n_contracts += q
-            open_cf += -L["side"] * L["px"] * q   # 賣收正、買付負
+            open_cf_mid += -L["side"] * L["px"] * q      # 賣收正、買付負（中價）
+            if L["type"] == "S":                          # 股票腿用 STOCK_COST_PCT
+                open_cf += -L["side"] * L["px"] * q
+            else:
+                act = "sell" if L["side"] == -1 else "buy"
+                open_cf += -L["side"] * _fill(L["px"], act, cm) * q
 
         exit_exp = pd.Timestamp(min(L["expiry"] for L in legs))
 
@@ -592,6 +632,7 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                 continue
             exit_spot = float(exit_day.close.iloc[0])
             close_cf = 0.0
+            close_cf_mid = 0.0
             stale = 0
             for L in legs:
                 q = L.get("qty", 1)
@@ -599,14 +640,21 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                 # 日曆價差嘅遠月腿喺近月到期日仍然有時間值,
                 # 用內在值等於當佢一文不值 —— 之前正係咁令 3,121 筆
                 # 全部錄虧 (勝率 0.0%)，close_cf 每一筆都硬係 0。
-                if pd.Timestamp(L["expiry"]) <= pd.Timestamp(d_exit):
+                expired = pd.Timestamp(L["expiry"]) <= pd.Timestamp(d_exit)
+                if expired:
                     v = intrinsic(L, exit_spot)
                 else:
                     v = leg_value(exit_day, L)
                     if v is None:
                         v = bs_value(L, exit_spot, d_exit, L.get("iv") or 30.0)
                         stale += 1
-                close_cf += L["side"] * v * q
+                close_cf_mid += L["side"] * v * q
+                # 到期內在值結算冇價差要跨；未到期嘅腿真要落市場平。
+                if expired or L["type"] == "S":
+                    close_cf += L["side"] * v * q
+                else:
+                    act = "buy" if L["side"] == -1 else "sell"
+                    close_cf += L["side"] * _fill(v, act, cm) * q
         else:
             exit_target = exit_exp - pd.Timedelta(days=EXIT_DTE)
             later = [x for x in days if x > d and x <= exit_target]
@@ -621,6 +669,7 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                 continue
             exit_spot = float(exit_day.close.iloc[0])
             close_cf = 0.0
+            close_cf_mid = 0.0
             stale = 0
             for L in legs:
                 q = L.get("qty", 1)
@@ -632,7 +681,12 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                          if pd.Timestamp(L["expiry"]) <= pd.Timestamp(d_exit)
                          else bs_value(L, exit_spot, d_exit, L.get("iv") or 30.0))
                     stale += 1
-                close_cf += L["side"] * v * q
+                close_cf_mid += L["side"] * v * q
+                if L["type"] == "S":
+                    close_cf += L["side"] * v * q
+                else:
+                    act = "buy" if L["side"] == -1 else "sell"
+                    close_cf += L["side"] * _fill(v, act, cm) * q
 
         # ── 倉位大小 ──────────────────────────────────────────────
         # 之前每筆一律做 1 張，令固定佣金（HK$20/腿）主導結果：
@@ -644,6 +698,8 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
                       min(MAX_CONTRACTS, RISK_PER_TRADE // max(risk_per_ct, 1))))
 
         gross = (open_cf + close_cf) * contract_size * qty
+        gross_mid = (open_cf_mid + close_cf_mid) * contract_size * qty
+        slip_cost = gross_mid - gross          # 滑價蒸發咗幾多（港元）
         # 期權腿：每張每腿收佣金 + 交易所費 + 證監會徵費（開、平各一次）。
         # 股票腿（Conversion／Reversal）：唔收期權佣金，收百分比成本
         # （印花稅 0.1% × 2 邊 + 佣金 ~0.08%），按成交金額計。
@@ -666,7 +722,11 @@ def backtest_one(code: str, chain: pd.DataFrame, builder, needs_all_exp: bool,
             "exit_spot": round(exit_spot, 3),
             "open_cf": round(open_cf, 4),
             "close_cf": round(close_cf, 4),
+            "open_cf_mid": round(open_cf_mid, 4),
+            "close_cf_mid": round(close_cf_mid, 4),
             "pnl": round(pnl, 1),
+            "pnl_mid": round(gross_mid - fees, 1),   # 零滑價口徑（舊引擎等價）
+            "slip_cost": round(slip_cost, 1),
             "fees": round(fees, 1),
             "margin": round(margin, 1),
             "qty": qty,
@@ -763,10 +823,25 @@ def composite(m: dict) -> float:
         1)
 
 
-def run(keys: list[str] | None = None, verbose: bool = True) -> dict:
+def run(keys: list[str] | None = None, verbose: bool = True,
+        slippage: float | None = None) -> dict:
+    cm = costs.CostModel(
+        slippage_per_leg=SLIPPAGE_PER_LEG if slippage is None else slippage,
+        commission_per_leg=0.0)
     specs = load_specs()
     chain = load_chain()
     codes = sorted(set(chain.stock_code.dropna()) & set(specs))
+    # 靜靜咁跑出「零筆交易」係最危險嘅失敗方式 —— 冇 contract_specs.json
+    # 時 codes 會係空集，成個回測會「成功」完成而每個策略都顯示冇成交，
+    # 睇落好似策略唔成立，其實只係缺一個規格檔。所以要即刻叫停。
+    if not specs:
+        raise FileNotFoundError(
+            f"{SPECS} 唔存在。先跑：python3 {ROOT}/contract_specs_hkex.py")
+    if not codes:
+        raise ValueError(
+            f"chain 同 specs 冇交集（chain {chain.stock_code.nunique()} 隻、"
+            f"specs {len(specs)} 隻）。多數係 hkats→stock_code 對照表未建："
+            f"先跑 python3 {ROOT}/options_scraper.py --days 400")
     by_code = {c: g.copy() for c, g in chain.groupby("stock_code") if c in codes}
 
     if verbose:
@@ -786,7 +861,7 @@ def run(keys: list[str] | None = None, verbose: bool = True) -> dict:
             cs = int(specs[code].get("contract_size") or 1000)
             try:
                 all_trades += backtest_one(code, by_code[code], builder,
-                                           all_exp, cs)
+                                           all_exp, cs, cm)
             except Exception as e:
                 if verbose:
                     print(f"\n    ⚠ {code}: {e}")
@@ -807,6 +882,7 @@ def run(keys: list[str] | None = None, verbose: bool = True) -> dict:
                 "exit_dte": EXIT_DTE, "step_days": STEP_DAYS,
                 "min_leg_oi": MIN_LEG_OI,
                 "commission_per_leg": COMMISSION_PER_LEG,
+                "slippage_per_leg": cm.slippage_per_leg,
             },
             "trades_sample": sorted(all_trades,
                                     key=lambda x: x["open"])[-60:],
@@ -837,6 +913,7 @@ def run(keys: list[str] | None = None, verbose: bool = True) -> dict:
         "trading_days": int(chain.date.nunique()),
         "date_range": [str(chain.date.min().date()), str(chain.date.max().date())],
         "chain_rows": int(len(chain)),
+        "slippage_per_leg": cm.slippage_per_leg,
         "tier_counts": {t: sum(1 for r in results if r["tier"] == t)
                         for t in "SABC"},
         "results": results,
@@ -848,10 +925,48 @@ def run(keys: list[str] | None = None, verbose: bool = True) -> dict:
     return out
 
 
+def sensitivity(keys: list[str] | None = None) -> dict:
+    """0 / 1 / 3 / 5% 每腿滑價網格。判斷策略係唔係只存在於零成本假設。"""
+    out = {}
+    for s in costs.SENSITIVITY_GRID:
+        r = run(keys, verbose=False, slippage=s)
+        rows = []
+        for e in r["results"]:
+            m = e.get("metrics") or {}
+            if not m.get("total_trades"):
+                continue
+            rows.append((e["name"], m["total_trades"], m["win_rate_pct"],
+                         m["expectancy_hkd"], m["sharpe_ratio"], e["tier"]))
+        out[f"{s * 100:.0f}%"] = rows
+
+    names = [r[0] for r in out[f"{costs.SENSITIVITY_GRID[0] * 100:.0f}%"]]
+    print(f"\n{'策略':<18}", end="")
+    for k in out:
+        print(f"{'滑價 ' + k:>22}", end="")
+    print()
+    print("-" * (18 + 22 * len(out)))
+    for i, nm in enumerate(names):
+        print(f"{nm:<18}", end="")
+        for k in out:
+            row = next((r for r in out[k] if r[0] == nm), None)
+            if row is None:
+                print(f"{'—':>22}", end="")
+            else:
+                cell = f"{row[2]:.0f}% / ${row[3]:,.0f} / {row[5]}"
+                print(f"{cell:>22}", end="")
+        print()
+    print("\n判斷：3% 一欄期望值轉負，代表該策略只存在於零成本假設之下。")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="真期權策略回測")
     ap.add_argument("--strategy", help="只跑指定策略 key（逗號分隔）")
     ap.add_argument("--list", action="store_true", help="列出所有策略")
+    ap.add_argument("--slippage", type=float, default=None,
+                    help=f"每腿滑價（結算價比例），預設 {SLIPPAGE_PER_LEG}")
+    ap.add_argument("--sensitivity", action="store_true",
+                    help="跑 0/1/3/5%% 每腿滑價網格")
     a = ap.parse_args()
 
     if a.list:
@@ -859,7 +974,10 @@ def main() -> None:
             print(f"{k:<18} {n:<16} {c:<10} {d}")
         return
     keys = a.strategy.split(",") if a.strategy else None
-    run(keys)
+    if a.sensitivity:
+        sensitivity(keys)
+        return
+    run(keys, slippage=a.slippage)
 
 
 if __name__ == "__main__":
