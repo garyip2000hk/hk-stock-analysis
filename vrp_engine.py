@@ -47,7 +47,19 @@ QUOTES = BASE / "imported" / "quotes.json"
 
 HORIZON = 21          # 前瞻交易日（≈ 1 個月）
 TARGET_DTE = 30       # 用邊個 DTE 附近嘅 IV
-MIN_HISTORY = 40      # 至少要幾個 VRP 觀測值
+
+# 審查報告 A5：VRP 觀測值嘅重疊問題。
+#
+# 前瞻 21 日窗口逐日滾動 → 相鄰兩個觀測值有 20/21 日重疊，
+# 500 個「觀測值」實際只有 ≈ 500/21 ≈ 24 個獨立樣本。原本 MIN_HISTORY=40
+# 即係 **少於 2 個獨立樣本**，任何均值／勝率／Sharpe 都係雜音。
+#
+# 兩手處理：
+#   1. 門檻提到 500 個原始觀測（≈ 24 個獨立樣本，≈ 2 年數據）；
+#   2. 所有統計同時出 block bootstrap 置信區間（block = HORIZON），
+#      令重疊被明示地反映在區間寬度上。
+MIN_HISTORY = 500
+MIN_INDEPENDENT = 20  # 最少獨立樣本數（n / HORIZON）
 MIN_OI = 3000         # 最低未平倉（流動性）
 MIN_TURNOVER = 3e6    # 最低股票日均成交額
 MIN_CHAIN_VOL = 200   # 該到期月全鏈最低日成交（真係有人交易）
@@ -55,30 +67,63 @@ MAX_IV = 90.0         # IV 上限：高過呢個通常係停牌／重組殘留�
 MAX_STALE_DAYS = 5    # 期權報價唔可以舊過幾日
 
 
-def load_quotes() -> pd.DataFrame:
-    """股價歷史 → 寬表（index=date, columns=stock_code, values=close）。"""
+# 審查報告 B1：原本 `load_quotes()` 標註 `-> pd.DataFrame` 但實際 return
+# tuple，而且檔案唔存在時只 return 一個 DataFrame → 呼叫方 `px, tv =`
+# 會直接 ValueError（訊息完全誤導，會令人以為係數據問題）。
+# 現在統一由 `load_ohlc()` 出一個 dict，`load_quotes()` 保留做相容 wrapper，
+# 兩條路徑喺任何情況下都回傳同一個形狀。
+FIELDS = ("close", "open", "high", "low", "turnover", "volume")
+
+
+def load_ohlc() -> dict[str, pd.DataFrame]:
+    """股價歷史 → {field: 寬表}（index=date, columns=stock_code）。
+
+    審查報告 A3 需要日內 high/low 去判斷短腳有冇被觸及；原本只讀 close，
+    觸價率會系統性低估。呢個函式一次拆出全部可用欄位，缺欄位就唔會出現
+    喺回傳嘅 dict（呼叫方用 `.get("high")` 判斷）。
+    """
+    empty = {f: pd.DataFrame() for f in FIELDS}
     if not QUOTES.exists():
-        return pd.DataFrame()
-    raw = json.loads(QUOTES.read_text())
+        return empty
+    try:
+        raw = json.loads(QUOTES.read_text())
+    except (json.JSONDecodeError, OSError):
+        return empty
     q = raw.get("quotes", raw)
-    rows: dict[str, dict[str, float]] = {}
-    turn: dict[str, dict[str, float]] = {}
+    if not isinstance(q, dict):
+        return empty
+
+    acc: dict[str, dict[str, dict[str, float]]] = {f: {} for f in FIELDS}
     for d, stocks in q.items():
+        if not isinstance(stocks, dict):
+            continue
         for code, rec in stocks.items():
             if not isinstance(rec, dict):
                 continue
-            c = rec.get("close")
-            if c:
-                rows.setdefault(code, {})[d] = float(c)
-            t = rec.get("turnover")
-            if t:
-                turn.setdefault(code, {})[d] = float(t)
-    px = pd.DataFrame(rows)
-    px.index = pd.to_datetime(px.index)
-    px = px.sort_index()
-    tv = pd.DataFrame(turn)
-    tv.index = pd.to_datetime(tv.index)
-    return px, tv.sort_index()
+            for f in FIELDS:
+                v = rec.get(f)
+                if v in (None, 0, ""):
+                    continue
+                try:
+                    acc[f].setdefault(code, {})[d] = float(v)
+                except (TypeError, ValueError):
+                    continue
+
+    out: dict[str, pd.DataFrame] = {}
+    for f in FIELDS:
+        df = pd.DataFrame(acc[f])
+        if df.empty:
+            out[f] = df
+            continue
+        df.index = pd.to_datetime(df.index)
+        out[f] = df.sort_index()
+    return out
+
+
+def load_quotes() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """相容 wrapper：(收市價寬表, 成交額寬表)。永遠回傳 2-tuple。"""
+    o = load_ohlc()
+    return o["close"], o["turnover"]
 
 
 def realized_vol_forward(px: pd.Series, horizon: int = HORIZON) -> pd.Series:
@@ -93,12 +138,18 @@ def realized_vol_back(px: pd.Series, window: int = HORIZON) -> pd.Series:
     return ret.rolling(window).std() * math.sqrt(252) * 100
 
 
-def _stats(s: pd.Series) -> dict:
+def _stats(s: pd.Series, block: int = HORIZON) -> dict:
     s = s.dropna()
     if len(s) < 5:
         return {"n": len(s)}
+    import portfolio as pf
+    mean_ci = pf.block_bootstrap_ci(s, block=block, stat="mean")
+    win_ci = pf.block_bootstrap_ci(s, block=block, stat="win_rate")
     return {
         "n": int(len(s)),
+        "n_independent": int(max(1, len(s) // max(block, 1))),
+        "mean_ci": mean_ci,
+        "win_rate_ci": win_ci,
         "mean": round(float(s.mean()), 2),
         "median": round(float(s.median()), 2),
         "std": round(float(s.std(ddof=1)), 2),
@@ -111,7 +162,8 @@ def _stats(s: pd.Series) -> dict:
 
 def _grade(vrp: dict, cur_pct: float | None, iv_rank: float | None) -> tuple[str, float]:
     """0-10 分：VRP 質素 + 當前時機。"""
-    if vrp.get("n", 0) < MIN_HISTORY:
+    if (vrp.get("n", 0) < MIN_HISTORY
+            or vrp.get("n_independent", 0) < MIN_INDEPENDENT):
         return "資料不足", 0.0
 
     score = 0.0
@@ -137,7 +189,7 @@ def _grade(vrp: dict, cur_pct: float | None, iv_rank: float | None) -> tuple[str
     elif win >= 50:
         score += 0.5
 
-    # 穩定性（VRP 相對標準差）
+    # 穩定性（VRP 均值／標準差）—— 呢個不係 Sharpe，只係信噪比
     sharpe = mean / std if std else 0
     if sharpe >= 0.8:
         score += 2.0
@@ -203,7 +255,16 @@ def analyse(code: str, iv_hist: pd.DataFrame, px: pd.DataFrame, tv: pd.DataFrame
     else:
         vrp_ser = (iv_ser.reindex(common) - rv_fwd.reindex(common)).dropna()
 
-    vrp = _stats(vrp_ser)
+    # 審查報告 B2：百分位口徑不一致。
+    # `cur_vrp` = IV − **回望** RV（因為未來 RV 未知），但原本拿佢去和
+    # `vrp_ser` = IV − **前瞻** RV 嘅分佈比→ 兩個分佈均值可以差幾個 vol 點，
+    # 百分位會系統性偏高或偏低。現在另建一條同口徑嘅回望 VRP 歷史
+    # 專門用作百分位比較。
+    common_b = iv_ser.index.intersection(rv_back.dropna().index)
+    vrp_back_ser = ((iv_ser.reindex(common_b) - rv_back.reindex(common_b)).dropna()
+                    if len(common_b) >= 10 else pd.Series(dtype=float))
+
+    vrp = _stats(vrp_ser, block=horizon)
 
     latest = daily.iloc[-1]
     cur_iv = float(latest.atm_iv)
@@ -219,8 +280,8 @@ def analyse(code: str, iv_hist: pd.DataFrame, px: pd.DataFrame, tv: pd.DataFrame
     # 當前 VRP 用「IV − 近期已實現波幅」做代理（未來 RV 未知）
     cur_vrp = round(cur_iv - cur_rv, 2) if cur_rv else None
     cur_pct = None
-    if cur_vrp is not None and len(vrp_ser) >= 20:
-        cur_pct = round(float((vrp_ser < cur_vrp).mean() * 100), 1)
+    if cur_vrp is not None and len(vrp_back_ser) >= 20:
+        cur_pct = round(float((vrp_back_ser < cur_vrp).mean() * 100), 1)
 
     iv_rank = None
     if len(iv_ser) >= 30:
@@ -247,7 +308,8 @@ def analyse(code: str, iv_hist: pd.DataFrame, px: pd.DataFrame, tv: pd.DataFrame
         and cur_iv <= MAX_IV
         and stale_days <= MAX_STALE_DAYS
     )
-    hist_ok = vrp.get("n", 0) >= MIN_HISTORY
+    hist_ok = (vrp.get("n", 0) >= MIN_HISTORY
+               and vrp.get("n_independent", 0) >= MIN_INDEPENDENT)
 
     return {
         "stock_code": code,
@@ -260,6 +322,7 @@ def analyse(code: str, iv_hist: pd.DataFrame, px: pd.DataFrame, tv: pd.DataFrame
         "iv_rv_ratio": round(cur_iv / cur_rv, 2) if cur_rv else None,
         "cur_vrp": cur_vrp,
         "cur_vrp_pct": cur_pct,
+        "cur_vrp_basis": "IV − 回望 RV（百分位亦同口徑）",
         "iv_rank": iv_rank,
         "vrp": vrp,
         "oi": oi,
@@ -278,7 +341,8 @@ def scan(horizon: int = HORIZON) -> list[dict]:
     iv_hist = ah.load()
     if iv_hist.empty:
         return []
-    px, tv = load_quotes()
+    o = load_ohlc()
+    px, tv = o["close"], o["turnover"]
     if px.empty:
         return []
     out = []
@@ -307,15 +371,24 @@ def _print_one(r: dict) -> None:
     if v.get("n", 0) < 5:
         print(f"  觀測值只有 {v.get('n', 0)} 個，不足以統計")
     else:
-        print(f"  觀測值              {v['n']} 個")
+        print(f"  觀測值              {v['n']} 個（重疊）→ ≈ "
+              f"{v.get('n_independent', 0)} 個獨立樣本")
         print(f"  VRP 均值            {v['mean']:+.2f}   （IV 平均高過實際波幅幾多）")
         print(f"  VRP 中位數          {v['median']:+.2f}")
-        print(f"  勝率                {v['win_rate']:.0f}%   （IV > 之後實際波幅嘅日子）")
+        wci = v.get("win_rate_ci") or {}
+        mci = v.get("mean_ci") or {}
+        print(f"  勝率                {v['win_rate']:.0f}%   （IV > 之後實際波幅嘅日子）"
+              + (f"   95% CI [{wci['lo']:.0f}%, {wci['hi']:.0f}%]" if wci else ""))
+        if mci:
+            print(f"  均值 95% CI         [{mci['lo']:+.2f}, {mci['hi']:+.2f}]   "
+                  f"(block bootstrap, block={mci['block']})")
+            if mci["lo"] <= 0 <= mci["hi"]:
+                print("     ⚠ 區間跨零 → 呢隻股嘅 VRP 喺統計上唔顯著大於零")
         print(f"  標準差              {v['std']:.2f}")
         print(f"  5% / 95% 分位       {v['p05']:+.1f} / {v['p95']:+.1f}")
         print(f"  最壞情況            {v['worst']:+.1f}")
         if v["std"]:
-            print(f"  VRP Sharpe          {v['mean'] / v['std']:.2f}")
+            print(f"  信噪比（非 Sharpe）    {v['mean'] / v['std']:.2f}")
 
     print("\n── Filter ──")
     tv_s = f"{r['turnover']/1e6:.1f}M" if r["turnover"] else "—"
@@ -336,8 +409,8 @@ def main() -> None:
 
     if a.stock:
         iv_hist = ah.load()
-        px, tv = load_quotes()
-        r = analyse(a.stock, iv_hist, px, tv, a.horizon)
+        o = load_ohlc()
+        r = analyse(a.stock, iv_hist, o["close"], o["turnover"], a.horizon)
         if not r:
             print(f"{a.stock} 冇足夠數據")
             return
@@ -356,7 +429,7 @@ def main() -> None:
 
     print(f"=== VRP 排行（前瞻 {a.horizon} 日，{len(rows)} 隻）===\n")
     print(f"{'代號':>6} {'名稱':<20} {'IV':>6} {'RV':>6} {'IV/RV':>6} "
-          f"{'VRP均':>6} {'勝率':>5} {'Sharpe':>7} {'IVR':>5} {'n':>4} {'分':>5}  評級")
+          f"{'VRP均':>6} {'勝率':>5} {'信噪比':>7} {'IVR':>5} {'n獨立':>6} {'分':>5}  評級")
     for r in rows[:a.limit]:
         v = r["vrp"]
         if v.get("n", 0) < 5:
@@ -367,7 +440,7 @@ def main() -> None:
         ivr = f"{r['iv_rank']:>5.0f}" if r["iv_rank"] is not None else "    —"
         print(f" {r['stock_code']:>5} {r['name'][:20]:<20} {r['iv']:>6.1f} {rv} {ratio} "
               f"{v['mean']:>+6.1f} {v['win_rate']:>4.0f}% {sh:>7.2f} {ivr} "
-              f"{v['n']:>4} {r['score']:>5.2f}  {r['grade']}")
+              f"{v.get('n_independent', 0):>6} {r['score']:>5.2f}  {r['grade']}")
 
     ok = [r for r in rows if r["tradeable"]]
     print(f"\n通過全部 filter（分數 ≥ 6、夠流通、歷史夠）：{len(ok)} 隻")

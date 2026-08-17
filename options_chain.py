@@ -167,7 +167,7 @@ def pick_expiry(stock_code: str, min_dte: int = 20, max_dte: int = 70,
         cand = [e for e in exps if e["dte"] >= 7]
     if not cand:
         return None
-    return max(cand, key=lambda e: (e["oi"] or 0))["date" if False else "expiry"]
+    return max(cand, key=lambda e: (e["oi"] or 0))["expiry"]
 
 
 def nearest(df: pd.DataFrame, target: float, cp: str, min_oi: float = 0) -> pd.Series | None:
