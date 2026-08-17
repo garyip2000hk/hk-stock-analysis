@@ -14,7 +14,7 @@ TABLES = {
     'holdings': ('holdings', ['part_id','issue_id','holding','at_date']),
     'parthold': ('parthold', ['part_id','issue_id','holding','at_date']),
     'dailylog': ('dailylog', ['at_date','issue_id','intermed_hldg','intermed_cnt','ncip_hldg','ncip_cnt','cip_hldg','cip_cnt','c5','c10','cust_hldg','brok_hldg']),
-    'bigchanges': ('bigchanges', ['at_date','issue_id','part_id','stkchg','prev_date']),
+    'bigchanges': ('bigchanges', ['at_date','issue_id','part_id','stk_change','prev_date']),
     'quotes': ('quotes', ['issue_id','at_date','prev_close','closing','ask','bid','high','low','vol','turn','susp','newsusp','noclose']),
     'pquotes': ('pquotes', ['issue_id','at_date','prev_close','closing','ask','bid','high','low','vol','turn','susp','newsusp','noclose']),
     'shortnames': ('shortnames', ['issue_id','short_name','from_date','to_date','row_id','stock_code','use_date','stock_ex_id','parallel']),

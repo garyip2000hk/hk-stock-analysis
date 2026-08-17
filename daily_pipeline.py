@@ -39,6 +39,59 @@ def run():
         print(f"  ✗ {e}")
 
 
+    # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
+    print("\n[1b/15] CCASS Coverage Gap Check...")
+    try:
+        import ccass_gap_check
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            import sys as _sys
+            _argv = _sys.argv
+            _sys.argv = ["ccass_gap_check.py", "--days", "45", "--json"]
+            try:
+                ccass_gap_check.main()
+            finally:
+                _sys.argv = _argv
+        import json as _json
+        gap = _json.loads(buf.getvalue())
+        report["sections"]["ccass_coverage"] = gap
+        if gap["status"] == "GAP":
+            print(f"  ⚠ 缺 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
+        else:
+            print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
+    except Exception as e:
+        report["sections"]["ccass_coverage"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
+    print("\n[1b/15] CCASS Coverage Gap Check...")
+    try:
+        import ccass_gap_check
+        gap = ccass_gap_check.check(days=45)
+        report["sections"]["ccass_coverage"] = gap
+        if gap["status"] == "GAP":
+            print(f"  ⚠ 缺少 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
+        else:
+            print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
+    except Exception as e:
+        report["sections"]["ccass_coverage"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
+    print("\n[1b/15] CCASS Coverage Gap Check...")
+    try:
+        import ccass_gap_check
+        gap = ccass_gap_check.check(days=45)
+        report["sections"]["ccass_coverage"] = gap
+        if gap["status"] == "GAP":
+            print(f"  ⚠ 缺 {len(gap['missing_trading_days'])} 個交易日: {', '.join(gap['missing_trading_days'])}")
+        else:
+            print(f"  ✓ 無缺口，最新 {gap['latest_local_ccass']}")
+    except Exception as e:
+        report["sections"]["ccass_coverage"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
     # 1a. Futu OpenD 數據（全港股快照 + 期權標的日K）
     print("\n[1a/14] Futu OpenD Data...")
     try:
@@ -380,6 +433,30 @@ def run():
     except Exception as e:
         report["sections"]["options_backtest"] = {"status": "error", "error": str(e)}
         print(f"  \u2717 {e}")
+
+    # 14b. 波幅交易系統（VRP + Term Structure + Iron Condor）
+    print("\n[14b/15] Volatility Trading System (VRP + Condor)...")
+    try:
+        import vol_system as vs
+        vsig = vs.build_signals()
+        tradeable = [r for r in vsig if r.get("strategy") not in ("迴避", "觀察")]
+        vs_path = BASE / "vol_system.json"
+        report["sections"]["vol_system"] = {
+            "status": "ok",
+            "total": len(vsig),
+            "tradeable": len(tradeable),
+            "top_picks": [
+                {"code": r["stock_code"], "name": r["name"], "strategy": r["strategy"],
+                 "iv": r["iv"], "vrp_grade": r["vrp_grade"],
+                 "bt_win": r.get("bt_win"), "bt_sharpe": r.get("bt_sharpe")}
+                for r in tradeable[:5]
+            ],
+            "output": str(vs_path),
+        }
+        print(f"  ✓ {len(tradeable)} 隻可交易 / {len(vsig)} 隻分析 → {vs_path}")
+    except Exception as e:
+        report["sections"]["vol_system"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
 
     print("\n[15/15] Saving report...")
     out = BASE / "daily_report.json"
