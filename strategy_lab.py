@@ -25,36 +25,55 @@ def load_json(filename):
             return json.load(f)
     return None
 
-def get_spot_price(symbol, today_str):
+def get_spot_price_and_atr(symbol, today_str):
+    """
+    獲取 Spot Price 同 ATR (Average True Range)。
+    用 yfinance 拎大約 20 日嘅數據，計 14-day ATR。
+    如果失敗就跌 fallback 返舊有邏輯。
+    """
     raw_symbol = str(symbol).strip()
+    
+    # 首先喺 Google Sheet Spot 睇吓有冇最新價格
+    spot_price = None
     try:
         spot_file = os.path.join(SPOT_DIR, f"spot_{today_str}.parquet")
         if os.path.exists(spot_file):
             spot_df = pd.read_parquet(spot_file)
-            if raw_symbol.isdigit():
-                search_symbols = {raw_symbol, str(int(raw_symbol))}
-            else:
-                search_symbols = {raw_symbol}
-            rows = spot_df[spot_df['Underlying'].astype(str).str.strip().isin(search_symbols)].copy()
-            if not rows.empty:
-                prices = pd.to_numeric(rows['現價'], errors='coerce').dropna()
-                if not prices.empty:
-                    return float(prices.iloc[0])
-
-        if raw_symbol == 'HSI':
-            ticker = '^HSI'
+            search_symbols = {raw_symbol}
+            if raw_symbol == 'HSI': search_symbols.update(['HSI', '^HSI'])
+            elif raw_symbol.isdigit(): search_symbols.add(raw_symbol.lstrip('0') + '.HK')
+            match = spot_df[spot_df['Underlying'].astype(str).isin(search_symbols)]
+            if not match.empty:
+                candidate = pd.to_numeric(match.iloc[0]['現價'], errors='coerce')
+                if pd.notna(candidate) and np.isfinite(float(candidate)) and float(candidate) > 0:
+                    spot_price = float(candidate)
+    except:
+        pass
+        
+    atr_value = None
+    # 嘗試用 yfinance 下載日線圖計 ATR 同埋 fallback 補底價格
+    try:
+        if raw_symbol == "HSI":
+            yf_sym = "^HSI"
         elif raw_symbol.isdigit():
-            ticker = f"{int(raw_symbol):04d}.HK"
+            yf_sym = f"{int(raw_symbol):04d}.HK"
         else:
-            return None
-        data = yf.Ticker(ticker).history(period="1d")
-        if not data.empty:
-            prices = pd.to_numeric(data['Close'], errors='coerce').dropna()
-            if not prices.empty:
-                return round(float(prices.iloc[-1]), 2)
-    except Exception:
-        return None
-    return None
+            yf_sym = None
+        if not yf_sym:
+            return spot_price, atr_value
+        tk = yf.Ticker(yf_sym)
+        hist = tk.history(period="1mo")
+        if not hist.empty:
+            if spot_price is None or not np.isfinite(float(spot_price)) or float(spot_price) <= 0:
+                spot_price = round(float(hist['Close'].iloc[-1]), 2)
+            # 計 14-day ATR (簡化版：High - Low 嘅平均)
+            hist['TR'] = hist['High'] - hist['Low']
+            atr_value = round(float(hist['TR'].rolling(14).mean().iloc[-1]), 2)
+    except Exception as e:
+        print(f"Failed to fetch ATR for {raw_symbol}: {e}")
+        pass
+        
+    return spot_price, atr_value
 
 def generate_data():
     today_str = datetime.now().strftime("%Y%m%d")
@@ -90,9 +109,15 @@ def generate_data():
             # Process HSI
             hsi_df = df[df['un'] == 'HSI'].copy()
             if not hsi_df.empty:
-                spot_price = get_spot_price('HSI', today_str) or hsi_df['cprice_num'].median()
+                spot_price, atr = get_spot_price_and_atr('HSI', today_str)
+                if not spot_price:
+                    spot_price = hsi_df['cprice_num'].median()
+                
+                # Dynamic ATR filter (e.g. 3 x ATR, or default 600 points)
+                search_range = (atr * 3) if pd.notnull(atr) and atr > 0 else 600.0
+                
                 hsi_df['zone'] = (hsi_df['cprice_num'] // 100) * 100
-                hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= 600]
+                hsi_df = hsi_df[abs(hsi_df['zone'] - spot_price) <= search_range]
                 
                 bear_df = hsi_df[hsi_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
                 qu_sum = bear_df.groupby('zone')['qu_num'].sum() if not bear_df.empty else pd.Series()
@@ -108,6 +133,8 @@ def generate_data():
                     "symbol": "HSI",
                     "name": "恆生指數",
                     "spot_price": spot_price,
+                    "atr": atr,
+                    "search_range": search_range,
                     "ccass_concentration": 75.5,
                     "heavy_bear_zone": heavy_bear_zone,
                     "heavy_bear_qu": heavy_bear_qu,
@@ -127,7 +154,14 @@ def generate_data():
                 name = name_map.get(sym_str, f"股票 {sym_str}")
                 
                 stk_df = df[df['un'] == sym].copy()
-                spot_price = get_spot_price(sym_str, today_str) or stk_df['cprice_num'].median()
+                if stk_df.empty:
+                    continue
+                    
+                spot_price, atr = get_spot_price_and_atr(sym_str, today_str)
+                if spot_price is None or not np.isfinite(float(spot_price)) or float(spot_price) <= 0:
+                    spot_price = stk_df['cprice_num'].median()
+                if pd.isna(spot_price) or not np.isfinite(float(spot_price)) or float(spot_price) <= 0:
+                    continue
                     
                 zone_step = max(0.5, round(spot_price * 0.02 * 2) / 2)
                 if spot_price > 200: zone_step = 5.0
@@ -135,8 +169,11 @@ def generate_data():
                 elif spot_price > 10: zone_step = 0.5
                 else: zone_step = 0.1
                 
+                # Dynamic ATR filter for stocks (e.g. 4 x ATR, or default 8%)
+                search_range = (atr * 4) if pd.notnull(atr) and atr > 0 else (spot_price * 0.08)
+                
                 stk_df['zone'] = (stk_df['cprice_num'] // zone_step) * zone_step
-                stk_df = stk_df[abs(stk_df['zone'] - spot_price) / spot_price <= 0.08]
+                stk_df = stk_df[abs(stk_df['zone'] - spot_price) <= search_range]
                 
                 bear_df = stk_df[stk_df['cp'].astype(str).str.contains('Bear|熊', case=False, na=False)]
                 qu_sum = bear_df.groupby('zone')['qu_num'].sum() if not bear_df.empty else pd.Series()
@@ -156,19 +193,22 @@ def generate_data():
                 iv_info = iv_map.get(sym_str, {})
                 iv_spike = iv_info.get('iv_chg_1d', 0)
                         
-                squeeze_list.append({
-                    "symbol": sym.zfill(5) if sym != 'HSI' else sym,
-                    "name": name,
-                    "spot_price": spot_price,
-                    "ccass_concentration": real_c10,
-                    "heavy_bear_zone": heavy_bear_zone,
-                    "heavy_bear_qu": heavy_bear_qu,
-                    "heavy_bull_zone": heavy_bull_zone,
-                    "heavy_bull_qu": heavy_bull_qu,
-                    "iv_spike": iv_spike,
-                    "score": 60 if heavy_bull_qu > 10 else 30,
-                    "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 20 else "WATCH"
-                })
+                if heavy_bear_qu > 10 or heavy_bull_qu > 10:
+                    squeeze_list.append({
+                        "symbol": sym.zfill(5) if sym != 'HSI' else sym,
+                        "name": name,
+                        "spot_price": spot_price,
+                        "atr": atr,
+                        "search_range": round(search_range, 2),
+                        "ccass_concentration": real_c10,
+                        "heavy_bear_zone": heavy_bear_zone,
+                        "heavy_bear_qu": heavy_bear_qu,
+                        "heavy_bull_zone": heavy_bull_zone,
+                        "heavy_bull_qu": heavy_bull_qu,
+                        "iv_spike": iv_spike,
+                        "score": 60 if heavy_bull_qu > 10 else 30,
+                        "signal": "STRONG_SQUEEZE" if heavy_bear_qu > 20 else "WATCH"
+                    })
                 
             # --- 2. Market Maker Shadow ---
             # 找出邊隻股票發行商對沖壓力最大 (CBBC 街貨最多)

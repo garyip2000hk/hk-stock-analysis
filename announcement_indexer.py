@@ -141,7 +141,7 @@ def get_recent_signals(limit=50) -> list:
     data = _load("announcements.json")
     data.sort(key=lambda x: x["date"], reverse=True)
     results = []
-    for a in data[:limit * 3]:
+    for a in data:
         cat = categorize(a["title"], a.get("doc_type", ""))
         if cat["category"] != "other":
             results.append({**a, **cat})

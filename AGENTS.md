@@ -240,3 +240,90 @@ CLI：`python3 content_feed.py [--kind iv|flow|strategy] [--json] [--write]`
 輸出 `options_data/content_briefs.json`。
 `daily_pipeline.py` 第 10 步自動跑，寫入 `daily_report.json` 嘅
 `sections.content_briefs`。
+
+## Futu OpenD 數據匯入（2026-08-15 新增）
+
+`futu_data_importer.py` — 由 OpenD (127.0.0.1:11111) 拉數據，輸出去
+`Desktop/db/Futu/`：
+- `Snapshot/snapshot_YYYYMMDD.parquet` — 期權標的即時快照（142 欄：沽空可否、
+  沽空率、融資狀態、抵押率、買賣價差、委比、波幅、每手股數…）
+- `Kline/kline_day.parquet` — append-only 日K，去重；含 PE、換手率、成交量、漲跌幅
+
+CLI：`--snapshot-only` / `--kline-only` / `--all-market`（快照掃全港股）/ `--days N`
+
+**配額規則**：歷史K線受 300 隻 / 30 日滾動限制。默認只做 135 隻**期權標的**
+（`options_data/contract_specs.json`），正好喺額度內。新股拉全年、已有股只拉最近
+10 日增量 — 同一隻股 30 日內重複拉唔再扣額，所以增量更新免費。
+`--all-market` 只影響快照（快照無配額限制），唔會碰 K線配額。
+
+`futu_scheduler.py` — 常駐 process 服務 `futu-data-scheduler`，每日 01:00–07:30 HKT
+取數窗口：01:00 跑 K線增量、01:30 跑快照，失敗每 30 分鐘重試，07:30 收工
+（唔撞 07:30 嘅 daily_pipeline）。狀態存 `futu_scheduler_state.json`，
+log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
+
+⚠️ **OpenD 登入要小心**：連續登入失敗會鎖帳號 27 分鐘。排程器只會檢查
+11111 端口通唔通，**唔會自動重登**；OpenD 死咗就跳過同記錄，唔會重試登入。
+手動登入要用 tmux（避免 supervisor 無限重啟撞鎖）：
+`tmux new-session -d -s futu '/opt/FutuOpenD/FutuOpenD -login_account=... -login_pwd=... -api_port=11111 -websocket_port=11112 -console=1'`
+然後 `tmux send-keys -t futu "req_phone_verify_code" C-m`，收到短信驗證碼後
+`tmux send-keys -t futu "input_phone_verify_code -code=XXXXXX" C-m`。
+
+## 期權策略真回測 vs 舊代理／舊鐵鷹回測（2026-08-17 對帳）
+
+同一個「鐵鷹」出現兩組完全相反嘅數字，**唔係隨機差異，係三個唔同嘅計法**。
+以後引用回測結果前，必須先講明用邊個引擎。
+
+| 引擎 | 檔案 | 買賣咩 | 鐵鷹結果 |
+|---|---|---|---|
+| 代理（股票） | `quant_engine/batch_backtest_results.json` | **股票**，用技術指標當期權訊號 | 無鐵鷹（29 條全部股票策略，28C+1B） |
+| 舊鐵鷹 | `condor_backtest.json` | 期權，但**到期前 14 日就套用到期損益公式** | 勝率 79.5%、平均 +17.4% 風險回報 |
+| 真期權 | `quant_engine/options_backtest_results.json` | 期權，**持到到期用內在值結算** | 勝率 55.7%、期望 **−$3,629** |
+
+**舊鐵鷹（`condor_engine.py`）為何偏高 —— 呢個係缺陷，唔係口味問題：**
+`backtest()` 喺 `FORCE_EXIT_DTE = 14` 日嘅股價上直接叫 `_payoff()`，
+而 `_payoff()` 係**到期損益公式**（只計內在值）。即係假設「剩 14 日嘅倉
+已經冇時間值」。實際剩 14 日平倉，賣方要付返嘅價**高過**內在值，
+所以舊數字系統性高估賣方。另外舊引擎亦唔扣任何佣金／交易所費。
+→ `condor_backtest.json` 嘅 79.5% 勝率**唔可以當實盤預期**。
+
+**真引擎（`options_backtester.py`）修過嘅兩個 bug（08-17）：**
+1. **`MIN_LEG_OI = 100` 把合理行使價篩走後,揀到深價內垃圾腳。**
+   例：03993 賣「delta 0.25 價外 Call」實際揀到行使價 8.0（spot 15.89，
+   delta 0.998）。加 `MAX_DELTA_DRIFT = 0.15`：揀到嘅腳 |delta| 偏離
+   目標超過 0.15 就唔開倉。
+2. **裸賣倉位大小計爆。** `strike*0.20 − net` 喺深價內變負數 → 跌到地板
+   `contract_size*0.01` → `qty` 撞 `MAX_CONTRACTS = 50`。加保證金地板
+   `spot * 0.10 * contract_size`。
+   修正後賣 Call 期望值由 −$982 收窄到 −$234，最壞單筆由 −$1,490,660
+   降到 −$132,203。
+3. 收 credit 嘅有翼結構加 `MIN_CREDIT_RATIO = 0.12`（同 `condor_engine`
+   一致），淨收入唔夠翼寬 12% 唔開倉。
+
+**現時真回測結論（2025-10-02 → 2026-08-14、129 隻標的、212 個交易日、
+6,710,162 條真實結算價）：**
+- 期權**買方**賺（買勒式 +$2,997／筆 B 級、買跨式 +$1,762），
+  **賣方全部負期望**（賣 Call −$234、賣 Put −$1,160、鐵鷹 −$3,629）。
+- 呢個內部一致：代表期內**實際已實現波幅大過期權隱含波幅**，
+  即係呢段期間港股期權**偏平（賣方冇溢價）**。同 `vrp_engine.py` 嘅
+  VRP 結論應該互相對得上——對唔上就要查。
+- 賣方勝率仍然高（賣 Call 81.5%）但期望值負 = **典型「贏多次細錢、
+  輸一次大錢」**。所以睇期權賣方策略**唔可以只睇勝率**，一定要睇
+  期望值同最壞單筆。
+- 唯一 S 級 `parity_arb`（Conversion／Reversal 三腳鎖死）勝率 99.2%、
+  最壞單筆只 −$105，結構上係真套利。**但 357 筆全部基於 HKEX 結算價,
+  而結算價 ≠ 可成交價**；真實買賣差價下大部分 parity 偏離會消失。
+  當佢係「數據上存在嘅偏離」，唔係「可落盤嘅利潤」。
+
+**共同限制（兩個引擎都有）：** 結算價唔等於可成交價；闊價位遠價外合約
+實際成本高過表上數字；唔計買賣差價同滑價。
+
+**接線（08-17 完成）：**
+- `daily_pipeline.py` 第 14 步：先 `chain_history.py --update` 補新交易日鏈，
+  再跑 `quant_engine/options_backtester.py`，摘要寫入 `daily_report.json`
+  嘅 `sections.options_backtest`（tier_counts + top 10）。
+- API `/api/options-backtest` 直讀 `quant_engine/options_backtest_results.json`。
+- 前端 `https://garysir.zo.space/stock-analysis/options-backtest`（私人）
+  按類別（真套利／期權買方／期權賣方／方向性價差／波幅套利）篩選，
+  每條顯示期望值／勝率／Sharpe／盈虧比／最壞單筆，展開見成交樣本。
+  頁頂固定警示：期權賣方唔可以只睇勝率。
+

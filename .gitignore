@@ -1,9 +1,17 @@
 __pycache__/
 *.pyc
+*.log
+
+# 大型數據 / 快取（唔入 git，太大 + 每日變）
+options_data/
+imported/
 *.json
 !zosite.json
 !package.json
 !tsconfig.json
-options_data/
-imported/
-*.log
+!quant_engine/strategy_tiers.json
+
+# 憑證 / 狀態
+*_state.json
+config.local.json
+.env

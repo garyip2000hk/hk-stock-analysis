@@ -1,3 +1,4 @@
+from datetime import datetime, date, timedelta
 """
 daily_pipeline.py — 每日全自動分析 pipeline
 Runs all data import + analysis in sequence.
@@ -22,7 +23,7 @@ sys.path.insert(0, str(BASE))
 
 def run():
     start = time.time()
-    today = date.today().isoformat()
+    today = datetime.now().date().isoformat()
     print(f"=== Daily Pipeline — {today} ===\n")
 
     report = {"date": today, "sections": {}}
@@ -37,6 +38,22 @@ def run():
         report["sections"]["import"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
+
+    # 1a. Futu OpenD 數據（全港股快照 + 期權標的日K）
+    print("\n[1a/14] Futu OpenD Data...")
+    try:
+        import futu_data_importer
+        futu_sync = futu_data_importer.run_import(days=365)
+        report["sections"]["futu_data"] = futu_sync
+        if futu_sync.get("status") == "skipped":
+            print(f"  ⚠ 跳過: {futu_sync.get('error')}")
+        else:
+            snap = (futu_sync.get("snapshot") or {}).get("rows", 0)
+            kl = futu_sync.get("kline") or {}
+            print(f"  ✓ 快照 {snap} 行；K線 {kl.get('rows', 0)} 行 / {kl.get('codes', 0)} 隻")
+    except Exception as e:
+        report["sections"]["futu_data"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
 
     # 1b. CBBC & Warrants Data
     print("\n[1b/13] CBBC & Warrants Data...")
@@ -73,21 +90,37 @@ def run():
     # 2. Corporate Actions
     print("\n[2/11] Corporate Actions...")
     try:
-        from corp_scanner import load_cache
-        cache = load_cache()
-        events = []
-        for code, evts in cache.items():
-            for e in evts:
-                d = e.get("date", "")
-                if d:
-                    e["_code"] = code
-                    events.append(e)
+        from announcement_indexer import get_summary, search, categorize, _load
+        from datetime import date, timedelta
+        
+        today = datetime.now().date().isoformat()
+        past_30 = (datetime.now().date() - timedelta(days=30)).isoformat()
+        
+        # Load all announcements to find real stats
+        all_anns = _load("announcements.json")
+        total_actions = sum(1 for a in all_anns if categorize(a.get("title", ""), a.get("doc_type", ""))["category"] != "other")
+        
+        # Recent events for display
+        recent_evts = [
+            a for a in all_anns
+            if a.get("date", "") >= past_30 and categorize(a.get("title", ""), a.get("doc_type", ""))["category"] != "other"
+        ]
+        recent_evts.sort(key=lambda x: x.get("date", ""), reverse=True)
+        
         report["sections"]["corp_actions"] = {
             "status": "ok",
-            "total": len(events),
-            "recent": sorted([e for e in events if normalize_date(e.get("date","")) and normalize_date(e.get("date","")) <= today and normalize_date(e.get("date","")) >= (date.fromisoformat(today) - timedelta(days=30)).isoformat()], key=lambda x: normalize_date(x.get("date","")), reverse=True)[:20],
+            "total": total_actions,
+            "recent": [
+                {
+                    "date": e.get("date", ""),
+                    "type": categorize(e.get("title", ""), e.get("doc_type", ""))["category"],
+                    "type_en": categorize(e.get("title", ""), e.get("doc_type", ""))["category"],
+                    "_code": e.get("stock_code", "").split("<br/>")[0] if e.get("stock_code") else ""
+                }
+                for e in recent_evts[:20]
+            ]
         }
-        print(f"  ✓ {len(events)} events")
+        print(f"  ✓ {len(recent_evts)} events in last 30 days")
     except Exception as e:
         report["sections"]["corp_actions"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
@@ -181,7 +214,7 @@ def run():
     print("\n[7/11] Options IV...")
     try:
         import options_scraper, iv_analyzer
-        options_scraper.ingest([date.today() - timedelta(days=i) for i in range(3, -1, -1)], verbose=False)
+        options_scraper.ingest([datetime.now().date() - timedelta(days=i) for i in range(3, -1, -1)], verbose=False)
         rows = iv_analyzer.analyse()
         ivs = sorted(r["iv"] for r in rows if r.get("iv") is not None)
         report["sections"]["options_iv"] = {
@@ -248,7 +281,7 @@ def run():
         content_feed.OUT.write_text(
             json.dumps(
                 {
-                    "generated_at": date.today().isoformat(),
+                    "generated_at": datetime.now().date().isoformat(),
                     "briefs": briefs,
                 },
                 ensure_ascii=False,
@@ -281,7 +314,74 @@ def run():
         report["sections"]["leaderboard"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
-    print("\n[12/12] Saving report...")
+    # 6h. 量化策略回測
+    print("\n[13/14] Quant Strategy Lab...")
+    try:
+        import subprocess
+        subprocess.run(["python3", "quant_engine/run_lab.py"])
+        lab_path = BASE / "quant_engine" / "strategy_lab.json"
+        if lab_path.exists():
+            lab = json.loads(lab_path.read_text(encoding="utf-8"))
+            report["sections"]["quant_lab"] = {
+                "status": "ok",
+                "run_at": lab.get("run_at"),
+                "total_strategies": len(lab.get("strategies", [])),
+                "top": [
+                    {"name": s["strategy"], "return": s.get("metrics", {}).get("total_return_pct", 0),
+                     "sharpe": s.get("metrics", {}).get("sharpe_ratio", 0)}
+                    for s in sorted(
+                        lab.get("strategies", []),
+                        key=lambda x: x.get("metrics", {}).get("sharpe_ratio", 0),
+                        reverse=True,
+                    )
+                ][:10],
+            }
+            print(f"  ✓ {len(lab.get('strategies', []))} 個策略回測完成")
+        else:
+            report["sections"]["quant_lab"] = {"status": "error", "error": "strategy_lab.json not found"}
+    except Exception as e:
+        report["sections"]["quant_lab"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 6i. 真期權策略回測（買賣期權合約，唔係股票代理）
+    print("\n[14/15] Options Strategy Backtest (真結算價)...")
+    try:
+        import subprocess
+        subprocess.run(["python3", "chain_history.py", "--update"], cwd=str(BASE))
+        subprocess.run(["python3", "quant_engine/options_backtester.py"], cwd=str(BASE))
+        obt_path = BASE / "quant_engine" / "options_backtest_results.json"
+        if obt_path.exists():
+            obt = json.loads(obt_path.read_text(encoding="utf-8"))
+            report["sections"]["options_backtest"] = {
+                "status": "ok",
+                "generated_at": obt.get("generated_at"),
+                "universe_count": obt.get("universe_count"),
+                "trading_days": obt.get("trading_days"),
+                "date_range": obt.get("date_range"),
+                "tier_counts": obt.get("tier_counts"),
+                "top": [
+                    {
+                        "name": r["name"],
+                        "category": r["category"],
+                        "tier": r["tier"],
+                        "trades": r["metrics"]["total_trades"],
+                        "win_rate_pct": r["metrics"]["win_rate_pct"],
+                        "expectancy_hkd": r["metrics"]["expectancy_hkd"],
+                        "sharpe": r["metrics"]["sharpe_ratio"],
+                        "worst_trade": r["metrics"]["worst_trade"],
+                    }
+                    for r in obt.get("results", [])[:10]
+                ],
+            }
+            print(f"  \u2713 {len(obt.get('results', []))} 條期權策略 · tier {obt.get('tier_counts')}")
+        else:
+            report["sections"]["options_backtest"] = {
+                "status": "error", "error": "options_backtest_results.json not found"}
+    except Exception as e:
+        report["sections"]["options_backtest"] = {"status": "error", "error": str(e)}
+        print(f"  \u2717 {e}")
+
+    print("\n[15/15] Saving report...")
     out = BASE / "daily_report.json"
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
