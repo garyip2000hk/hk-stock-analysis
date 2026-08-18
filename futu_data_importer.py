@@ -10,7 +10,7 @@ Futu OpenD 數據匯入 — 兩路並行
 import argparse
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import futu
@@ -26,8 +26,15 @@ HOST = "127.0.0.1"
 PORT = 11111
 
 
+HKT = timezone(timedelta(hours=8))
+
+
+def now_hkt():
+    return datetime.now(HKT)
+
+
 def log(msg):
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    print(f"[{now_hkt():%H:%M:%S}] {msg}", flush=True)
 
 
 def connect():
@@ -63,7 +70,7 @@ def fetch_snapshot(ctx, codes=None):
 
     df_all = pd.concat(frames, ignore_index=True)
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
-    out = SNAP_DIR / f"snapshot_{datetime.now():%Y%m%d}.parquet"
+    out = SNAP_DIR / f"snapshot_{now_hkt():%Y%m%d}.parquet"
     df_all.to_parquet(out, index=False)
     log(f"✅ 快照: {len(df_all)} 行 → {out.name}")
     return df_all

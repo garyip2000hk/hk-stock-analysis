@@ -15,3 +15,4 @@ imported/
 *_state.json
 config.local.json
 .env
+.cbbc_radar_secrets

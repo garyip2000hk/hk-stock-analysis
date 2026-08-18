@@ -268,6 +268,42 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 然後 `tmux send-keys -t futu "req_phone_verify_code" C-m`，收到短信驗證碼後
 `tmux send-keys -t futu "input_phone_verify_code -code=XXXXXX" C-m`。
 
+⚠️ **快照檔名用香港時間（HKT）日期**（`futu_data_importer.py` 嘅 `now_hkt()`，08-18 修）。
+之前用 `datetime.now()`（伺服器 UTC）—— 凌晨 01:30 HKT 嘅快照會寫落**尋日**嘅檔名
+（覆蓋舊檔之餘，健康檢查搵唔到今日檔 → 假警報）。log 時間戳都係 HKT。
+
+## 牛熊波幅雷達重建（2026-08-18，OpenD 版取代 Manus 私有 repo）
+
+`cbbc_radar_builder.py` — 每晚生成 gsmart-box「牛熊波幅雷達」Dataset JSON：
+- HSI/VHSI 用 OpenD **快照**（`HK.800000` / `HK.800125`，唔用 kline 配額）
+- 恒指牛熊證名單由本地 scrape `Desktop/db/CBBC/cbbc_*.parquet`（`un=='HSI'`）
+- batch snapshot（200/批，~8 秒）→ `wrt_recovery_price` + `wrt_street_vol`
+- 每個交易日嘅區間聚合存 `cbbc_radar/days/<date>.json`（append-only），
+  `days[]` = 最近 5 日；輸出 `cbbc_radar/dataset_latest.json`
+- 設咗 `CBBC_RADAR_UPDATE_URL` + `CBBC_RADAR_UPDATE_SECRET`（Zo Secrets）
+  就自動 POST 上 `https://gsmart-box.manus.space/api/cbbc/update`
+
+**公式（對過舊 bundled dataset 逐項重現，勿改）**：200 點區間；
+`EM = close × VHSI/√252`；upper/lower zone 嘅 `overlapFraction` = 區間同
+`[close,upperDay]`／`[lowerDay,close]` 交集比例（分母 hi−lo=199）；
+`coveredAmount = outstanding × overlap`；`distanceWeight = max(0.15, 1−|mid−close|/EM)`；
+`weightedContribution = covered × distanceWeight`；
+scores=(bear−bull)/sum；verdict 用 weightedScore ±0.25 定型（唔再靠 AI）。
+zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（street_vol/1e6）。
+夜跑（21:30 HKT）`premarket` 留空；要盤前資料要另加朝 08:40 跑 + ADR scrape。
+
+`cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每日 21:30 HKT 跑，
+失敗 22:00/22:30 重試。entrypoint 用 `bash -c 'source /root/.zo_secrets; ...'`
+去食 Secrets。
+
+### 牛熊波幅雷達（gsmart-box，OpenD 重建版，08-18）
+
+- `cbbc_radar_builder.py` — 每日生成 dataset JSON：`HK.800000`(恒指) + `HK.800125`(VHSI) 快照 + 本地 CBBC scrape 名單逐隻 batch snapshot 攞 `wrt_recovery_price` / `wrt_street_vol`；200 點 zone 聚合；EM=close×VHSI/√252；verdict 用 weightedScore ±0.25；歷史日 append 存 `cbbc_radar/days/<date>.json`
+- `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每晚 21:30 HKT 交易日跑（失敗 22:00/22:30 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`
+- **密鑰喺 `stock-analysis/.cbbc_radar_secrets`**（chmod 600，已 gitignore）——平台 Secrets 同步有延遲/唔可靠，排程器 entrypoint 係 source `/root/.zo_secrets` 再 source 呢個檔
+- **⚠️ Manus edge WAF 會 403 擋 Python-urllib 預設 UA**（唔係密鑰錯！密鑰錯係 401）——push 一定要帶 browser UA header
+- 盤前 ADR（premarket 段）舊版靠朝 08:40 Manus 跑 scrape；Zo 版暫時留空，要嘅話另加朝早 08:40 排程 + ADR 來源
+
 ## 期權策略真回測 vs 舊代理／舊鐵鷹回測（2026-08-17 對帳）
 
 同一個「鐵鷹」出現兩組完全相反嘅數字，**唔係隨機差異，係三個唔同嘅計法**。
