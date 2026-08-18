@@ -247,6 +247,8 @@ def build_day(ctx, trading_date):
         "bullWeighted": round(bull_w, 4), "bearWeighted": round(bear_w, 4),
         "coverageScore": round(coverage_score, 4), "weightedScore": round(weighted_score, 4),
         "verdict": verdict, "premarket": premarket, "targetFocus": target_focus,
+        # 信號應用日 = 信號日本身（08:10 已用當日 08:00 結算數據，唔再順延）
+        "predictionDate": trading_date,
     }
     return record
 
