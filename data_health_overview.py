@@ -174,6 +174,21 @@ def repair_radar():
     return _run(["bash", "-c", cmd], 600)
 
 
+def repair_strategy_lab():
+    return _run([PY, str(SA / "strategy_lab.py")], 900)
+
+
+def verify_strategy_lab_source():
+    def _do():
+        try:
+            sl = json.loads((SA / "options_data/strategy_lab.json").read_text(encoding="utf-8"))
+            src = (sl.get("data_freshness") or {}).get("cbbc_source", "")
+            return src == "OpenD", f"來源 {src}"
+        except Exception as e:
+            return False, f"讀唔到: {e}"
+    return _do
+
+
 def restart_service(svc):
     def _do():
         return _run(["supervisorctl", "-c", SUP_CONF, "restart", svc], 120)
@@ -325,10 +340,11 @@ def part_a(ltday):
     check_file("A", "CCASS", "dailylog.parquet", DB / "CCASS/dailylog.parquet", 3)
     check_file("A", "CCASS", "shortnames.parquet", DB / "CCASS/shortnames.parquet", 3)
 
-    # 牛熊 / 窩輪 / 現貨（Windows scraper 落 Desktop，冇補抓源 → 只警報）
-    check_dated("A", "牛熊證", "cbbc", str(DB / "CBBC"), "cbbc_", ltday)
-    check_dated("A", "窩輪", "warrants", str(DB / "Warrants"), "warrants_", ltday)
-    check_dated("A", "現貨", "spot", str(DB / "Spot"), "spot_", ltday)
+    # 牛熊 / 窩輪 / 現貨 scrape 檔 — 2026-08-20 起只做後備（主源已轉 OpenD）。
+    # 過期唔算異常：strategy_lab 用 OpenD，scrape 只剩外國指數補位。資訊性記錄。
+    for _nm, _pfx in (("牛熊證(後備)", "cbbc_"), ("窩輪(後備)", "warrants_"), ("現貨(後備)", "spot_")):
+        _ds, _age = latest_dated(str(DB / "CBBC" if _pfx == "cbbc_" else DB / ("Warrants" if _pfx == "warrants_" else "Spot")), _pfx)
+        add("A", "後備數據", _nm, True, f"最新 {_ds}（後備，過期唔警報）" if _ds else "冇檔案（後備）")
 
     # 期權數據（IV 過期 → 自動 backfill；下游由 07:30 pipeline 更新）
     check_file("A", "期權 IV", "iv_history.parquet", SA / "options_data/iv_history.parquet",
@@ -350,7 +366,18 @@ def part_a(ltday):
     # 每日報告／波幅系統（由排程 pipeline 生成 → 只警報）
     check_file("A", "每日報告", "daily_report.json", SA / "daily_report.json", 2)
     check_file("A", "波幅系統", "vol_system.json", SA / "vol_system.json", 5)
-    check_file("A", "策略實驗室", "strategy_lab.json", SA / "strategy_lab.json", 3)
+    check_file("A", "策略實驗室", "strategy_lab.json", SA / "options_data/strategy_lab.json", 3,
+               repair=repair_strategy_lab)
+    # strategy_lab 主源必須係 OpenD（scrape-fallback = 主流程壞咗）
+    try:
+        _sl = json.loads((SA / "options_data/strategy_lab.json").read_text(encoding="utf-8"))
+        _src = (_sl.get("data_freshness") or {}).get("cbbc_source", "unknown")
+        add("A", "策略實驗室", "牛熊主源", _src == "OpenD",
+            f"來源 {_src}" + ("" if _src == "OpenD" else "（應為 OpenD，跌咗返 scrape 後備）"),
+            repair_strategy_lab, verify_strategy_lab_source())
+    except Exception as e:
+        add("A", "策略實驗室", "牛熊主源", False, f"讀唔到: {e}",
+            repair_strategy_lab, verify_strategy_lab_source())
 
     # 公眾來源補抓（SFC/CR 每週公佈 → 過期自動補抓）
     check_file("A", "沽空", "short_positions.json (SFC 週報)", SA / "imported/short_positions.json",
