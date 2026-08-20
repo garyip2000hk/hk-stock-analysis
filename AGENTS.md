@@ -278,7 +278,7 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 - HSI/VHSI 用 OpenD **快照**（`HK.800000` / `HK.800125`，唔用 kline 配額）
 - 恒指牛熊證名單**直接由 OpenD `get_warrant`（HK.800000 全批 BULL+BEAR，status==NORMAL，200/頁分頁）**——唔再依賴本地 scrape 檔／Manus Google Sheets；本地 `Desktop/db/CBBC/cbbc_*.parquet` 只做後備（get_warrant 失敗先用）（2026-08-20 改）
   - 語義同舊版一致：朝早 08:00 跑時 NORMAL 名單 = 當時仲 live 嘅牛熊證（夜間跑會少咗當日已被收回嗰啲，屬預期）
-  - `strategy_lab.py` 仍然讀 `Desktop/db/CBBC` + `Desktop/db/Spot`（Manus Google Sheets pipeline，07:30 `cbbc_warrants_importer.sync_data()` 落地）——呢個係牛熊/窩輪數據最後一個 Manus 依賴
+  - `strategy_lab.py`（立體策略）**已轉 OpenD 主源（2026-08-20）**：`cbbc_opend_fetcher.py` 用 get_warrant（HSI+135 期權標的 BULL/BEAR）+ batch snapshot（現價）+ request_history_kline（14日 ATR）重現舊 scrape schema；⚠️ hket `qu` 係正規化街貨量 = `street_vol ÷ (conversion_ratio×100)`，唔係 raw 百萬份。scrape 檔降級做（a）外國指數 SPX/DJI/NDX 補位（futu get_warrant 唔支援美股指數）（b）OpenD 全掛時後備。`data_freshness.cbbc_source` 顯示 'OpenD' 或 'scrape-fallback'
 - batch snapshot（200/批，~8 秒）→ `wrt_recovery_price` + `wrt_street_vol`
 - 每個交易日嘅區間聚合存 `cbbc_radar/days/<date>.json`（append-only），
   `days[]` = 最近 5 日；輸出 `cbbc_radar/dataset_latest.json`

@@ -10,6 +10,14 @@ sys.path.append('/home/workspace/stock-analysis')
 import ccass_local
 from cbbc_warrants_importer import find_latest_snapshot
 
+try:
+    import cbbc_opend_fetcher as opend
+except Exception:
+    opend = None
+
+_SPOT_CACHE = {}
+_ATR_CACHE = {}
+
 OUT_PATH = "/home/workspace/stock-analysis/options_data/strategy_lab.json"
 CBBC_DIR = "/home/workspace/Desktop/db/CBBC"
 SPOT_DIR = "/home/workspace/Desktop/db/Spot"
@@ -27,11 +35,14 @@ def load_json(filename):
 
 def get_spot_price_and_atr(symbol, today_str):
     """
-    獲取 Spot Price 同 ATR (Average True Range)。
-    用 yfinance 拎大約 20 日嘅數據，計 14-day ATR。
-    如果失敗就跌 fallback 返舊有邏輯。
+    獲取 Spot Price 同 ATR：OpenD cache 優先（spot=get_market_snapshot、ATR=本地 kline_day.parquet），
+    失敗先跌返舊邏輯（Spot parquet / yfinance）。
     """
     raw_symbol = str(symbol).strip()
+    if raw_symbol in _SPOT_CACHE:
+        return _SPOT_CACHE[raw_symbol], _ATR_CACHE.get(raw_symbol)
+    if raw_symbol == 'HSI' and 'HSI' in _SPOT_CACHE:
+        return _SPOT_CACHE['HSI'], _ATR_CACHE.get('HSI')
     
     # 首先喺 Google Sheet Spot 睇吓有冇最新價格
     spot_price = None
@@ -51,6 +62,15 @@ def get_spot_price_and_atr(symbol, today_str):
         pass
         
     atr_value = None
+    if opend is not None:
+        try:
+            sp, at = opend.fetch_spot_atr_one(raw_symbol)
+            if sp is not None:
+                _SPOT_CACHE[raw_symbol] = sp
+                _ATR_CACHE[raw_symbol] = at
+                return sp, at
+        except Exception:
+            pass
     # 嘗試用 yfinance 下載日線圖計 ATR 同埋 fallback 補底價格
     try:
         if raw_symbol == "HSI":
@@ -80,8 +100,59 @@ def generate_data():
     expected_cbbc_file = os.path.join(CBBC_DIR, f"cbbc_{today_str}.parquet")
     fallback_cbbc_file = find_latest_snapshot(CBBC_DIR, "cbbc")
     cbbc_file = Path(expected_cbbc_file) if os.path.exists(expected_cbbc_file) else fallback_cbbc_file
-    cbbc_status = "fresh" if cbbc_file and str(cbbc_file) == expected_cbbc_file else ("stale" if cbbc_file else "missing")
     cbbc_source_date = cbbc_file.stem.removeprefix("cbbc_") if cbbc_file else None
+    
+    # ---- 主源：OpenD（牛熊證 + 現價 + ATR 一手包辦）----
+    opend_df = None
+    if opend is not None:
+        try:
+            opend_df = opend.fetch_universe(verbose=False)
+        except Exception as e:
+            print(f"⚠️ OpenD 牛熊證攞唔到: {e}")
+            opend_df = None
+
+    if opend_df is not None:
+        # 現價 + ATR 入 cache（下方 get_spot_price_and_atr 即中）
+        try:
+            spots = opend.fetch_spots(verbose=False)
+            if spots:
+                _SPOT_CACHE.clear(); _SPOT_CACHE.update(spots)
+        except Exception as e:
+            print(f"⚠️ OpenD 現價攞唔到: {e}")
+        try:
+            uns = [u for u in opend_df["un"].unique() if u != "HSI"]
+            stk_counts = opend_df[opend_df["un"] != "HSI"]["un"].value_counts()
+            active = stk_counts[stk_counts > 10].index.tolist()
+            top5 = opend_df[opend_df["un"] != "HSI"].groupby("un")["qu"].sum().nlargest(5).index.tolist()
+            atrs = opend.fetch_atrs(["HSI"] + active + top5, verbose=False)
+            if atrs:
+                _ATR_CACHE.clear(); _ATR_CACHE.update(atrs)
+        except Exception as e:
+            print(f"⚠️ OpenD ATR 攞唔到: {e}")
+
+        # 外國指數（SPX/DJI/NDX 等）futu get_warrant 唔支援 → 由 scrape 檔補
+        if cbbc_file:
+            try:
+                scrape_df = pd.read_parquet(cbbc_file)
+                opend_uns = set(opend_df["un"].astype(str))
+                foreign = scrape_df[scrape_df["un"].astype(str).isin(
+                    [u for u in scrape_df["un"].astype(str).unique() if u not in opend_uns])]
+                if len(foreign) > 0:
+                    opend_df = pd.concat([opend_df, foreign[opend_df.columns]], ignore_index=True)
+            except Exception:
+                pass
+        cbbc_status = "fresh"
+        cbbc_source = "OpenD"
+        cbbc_source_date = today_str
+        print(f"✅ 牛熊證主源: OpenD（{len(opend_df)} 隻 / {opend_df['un'].nunique()} 個標的，含外國指數後備補位）")
+    else:
+        cbbc_source = "scrape-fallback"
+        cbbc_status = "fresh" if cbbc_file and str(cbbc_file) == expected_cbbc_file else ("stale" if cbbc_file else "missing")
+        print(f"⚠️ OpenD 失敗 → 用返 scrape 檔 ({cbbc_status})")
+    if opend_df is not None:
+        cbbc_source_path = "OpenD get_warrant (HSI+135 期權標的)"
+    else:
+        cbbc_source_path = str(cbbc_file) if cbbc_file else None
     
     # Load supporting data
     ccass_cross = load_json("ccass_options_cross.json") or []
@@ -99,9 +170,16 @@ def generate_data():
     
     name_map = {'700': '騰訊控股', '9988': '阿里巴巴', '3690': '美團', '388': '香港交易所', '5': '匯豐控股', '1299': '友邦保險', '941': '中國移動', '2318': '中國平安', '1211': '比亞迪', '1810': '小米集團', '981': '中芯國際', '883': '中國海洋石油'}
     
-    if cbbc_file:
+    df = None
+    if opend_df is not None:
+        df = opend_df
+    elif cbbc_file:
         try:
             df = pd.read_parquet(cbbc_file)
+        except Exception as e:
+            print(f"Error reading CBBC: {e}")
+    if df is not None:
+        try:
             df['cprice_num'] = df['cprice'].astype(str).str.replace(',', '').astype(float)
             df['qu_num'] = pd.to_numeric(df['qu'], errors='coerce').fillna(0)
             
@@ -315,8 +393,9 @@ def generate_data():
         "updated_at": datetime.now().isoformat(),
         "data_freshness": {
             "cbbc": cbbc_status,
+            "cbbc_source": cbbc_source,
             "cbbc_source_date": cbbc_source_date,
-            "cbbc_source_path": str(cbbc_file) if cbbc_file else None,
+            "cbbc_source_path": cbbc_source_path,
         },
         "squeeze_radar": squeeze_list,
         "market_maker_shadow": market_maker_list,
