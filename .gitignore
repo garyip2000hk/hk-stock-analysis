@@ -16,3 +16,6 @@ imported/
 config.local.json
 .env
 .cbbc_radar_secrets
+
+# 每日健康報告（勿入 git）
+reports/
