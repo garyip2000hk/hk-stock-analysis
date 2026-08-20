@@ -140,21 +140,22 @@ def previous_night_premarket(ctx, trading_date, close):
         return None
 
 
-def build_day(ctx, trading_date):
+def build_day(ctx, trading_date, prediction_date=None):
     mmdd = trading_date[5:].replace("-", "-")
     # ── HSI + VHSI 快照 ──
+    # 用 prev_close_price（trading_date 當日嘅正式收市價），唔係 last_price（即市價）
     idx = snapshot(ctx, [HSI, VHSI])
     hsi = idx[idx["code"] == HSI].iloc[0]
     vhsi_row = idx[idx["code"] == VHSI].iloc[0]
-    close = float(hsi["last_price"])
+    close = float(hsi["prev_close_price"])
     open_p = float(hsi["open_price"])
     high = float(hsi["high_price"])
     low = float(hsi["low_price"])
-    vhsi = float(vhsi_row["last_price"]) / 100.0  # 存小數（與舊格式一致）
+    vhsi = float(vhsi_row["prev_close_price"]) / 100.0  # 存小數（與舊格式一致）
     em1d = close * vhsi / (252 ** 0.5)
     upper_day = round(close + em1d)
     lower_day = round(close - em1d)
-    log(f"HSI 收 {close:,.2f}（{mmdd}） VHSI {vhsi*100:.2f} EM±{em1d:.1f} → {lower_day}-{upper_day}")
+    log(f"HSI 收 {close:,.2f}（{mmdd}，prev_close） VHSI {vhsi*100:.2f} EM±{em1d:.1f} → {lower_day}-{upper_day}")
 
     # ── 牛熊證快照 ──
     codes, src_file = cbbc_codes()
@@ -208,7 +209,7 @@ def build_day(ctx, trading_date):
     weighted_score = ((bear_w - bull_w) / total_w) if total_w else 0
 
     # ── 判定：「後」方向用當日 08:00 結算牛熊數據；「先」方向用前一晚夜期+ADR ──
-    premarket = previous_night_premarket(ctx, trading_date, close)
+    premarket = previous_night_premarket(ctx, prediction_date or trading_date, close)
     if weighted_score >= 0.25:
         back = "上屠熊"
     elif weighted_score <= -0.25:
@@ -238,6 +239,7 @@ def build_day(ctx, trading_date):
     log(f"判定: {verdict} | coverage {coverage_score:+.4f} | weighted {weighted_score:+.4f} | zones {len(zones)}")
     record = {
         "date": trading_date, "mmdd": mmdd,
+        "settlementDate": trading_date,
         "close": round(close, 2), "open": round(open_p, 2), "high": round(high, 2), "low": round(low, 2),
         "vhsi": round(vhsi, 6),
         "expectedMove1Day": round(em1d, 4),
@@ -248,7 +250,7 @@ def build_day(ctx, trading_date):
         "coverageScore": round(coverage_score, 4), "weightedScore": round(weighted_score, 4),
         "verdict": verdict, "premarket": premarket, "targetFocus": target_focus,
         # 信號應用日 = 信號日本身（08:10 已用當日 08:00 結算數據，唔再順延）
-        "predictionDate": trading_date,
+        "predictionDate": prediction_date or trading_date,
     }
     return record
 
@@ -272,7 +274,7 @@ def build_dataset(record):
     ds = {
         "generatedAt": now,
         "refreshedAt": now,
-        "sourceNote": "每個交易日 08:10（HKT）按當日結算牛熊數據更新；「先」向按前一晚夜期及 ADR（OpenD）。",
+        "sourceNote": "每個交易日 08:10（HKT）用昨日結算牛熊數據判當日；「先」向按前晚夜期及 ADR（OpenD）。",
         "availableDates": [d["date"] for d in days if days],
         "days": days,
     }
@@ -315,7 +317,17 @@ def main():
         if not is_trading_day(ctx, today):
             log("SKIP: 今日非交易日")
             return 0
-        record = build_day(ctx, today)
+        import datetime as _dt
+        pred = today
+        # trade_dt = 最近一個已收市交易日（開市前跑 = 昨日；收市後跑 = 今日）
+        # 08:10 跑時：今日係 08-20，trade_dt = 08-19（昨日結算）
+        # 收市後跑時：今日係 08-20，trade_dt = 08-20（今日結算）
+        trade_dt = today
+        if not is_trading_day(ctx, trade_dt):
+            trade_dt = (_dt.datetime.strptime(trade_dt, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+            while not is_trading_day(ctx, trade_dt):
+                trade_dt = (_dt.datetime.strptime(trade_dt, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        record = build_day(ctx, trade_dt, pred)
         ds = build_dataset(record)
         log(f"已寫 {DATASET_PATH}（days={len(ds['days'])}）")
         return 0 if push(ds) else 1
