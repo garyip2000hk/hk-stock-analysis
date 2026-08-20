@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-牛熊波幅雷達排程 — 每個交易日 08:10 (HKT) 生成 dataset 並推上 gsmart-box
+牛熊波幅雷達排程 — 每個交易日 08:00 (HKT) 生成 dataset 並推上 gsmart-box
 
-  08:10  跑 cbbc_radar_builder.py（當日 08:00 結算牛熊數據判當日「後」方向；「先」方向用前一晚夜期+ADR）
+  08:00  跑 cbbc_radar_builder.py（當日 08:00 結算牛熊數據判當日「後」方向；「先」方向用前一晚夜期+ADR）
   失敗 08:40 / 09:10 重試兩次，之後收工等聽朝
   狀態存 cbbc_radar_scheduler_state.json；log 去 /dev/shm/cbbc-radar-scheduler.log
   唔燒 AI 額度。牛熊證街貨喺朝早 09:00 前後先由發行商更新，
@@ -23,7 +23,7 @@ BUILDER = BASE / "cbbc_radar_builder.py"
 STATE_PATH = BASE / "cbbc_radar_scheduler_state.json"
 PY = "/usr/local/bin/python3"
 
-RUN_AT = (8, 10)
+RUN_AT = (8, 0)
 RETRY_EVERY_MIN = 30
 LAST_RETRY = (9, 10)
 TIMEOUT_SEC = 15 * 60
@@ -68,7 +68,7 @@ def run_builder():
 
 
 def main():
-    log("牛熊雷達排程啟動 — 每個交易日 08:10 HKT")
+    log("牛熊雷達排程啟動 — 每個交易日 08:00 HKT")
     while True:
         now = datetime.now(HKT)
         today = now.strftime("%Y-%m-%d")

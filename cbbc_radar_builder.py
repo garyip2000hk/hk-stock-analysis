@@ -317,16 +317,13 @@ def main():
         if not is_trading_day(ctx, today):
             log("SKIP: 今日非交易日")
             return 0
+        # 規則（用戶定）：朝早攞嘅永遠係「上一個交易日」嘅結算數據
         import datetime as _dt
-        pred = today
-        # trade_dt = 最近一個已收市交易日（開市前跑 = 昨日；收市後跑 = 今日）
-        # 08:10 跑時：今日係 08-20，trade_dt = 08-19（昨日結算）
-        # 收市後跑時：今日係 08-20，trade_dt = 08-20（今日結算）
-        trade_dt = today
-        if not is_trading_day(ctx, trade_dt):
+        pred = today  # 適用日 = 今日
+        trade_dt = (_dt.datetime.strptime(today, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        while not is_trading_day(ctx, trade_dt):
             trade_dt = (_dt.datetime.strptime(trade_dt, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
-            while not is_trading_day(ctx, trade_dt):
-                trade_dt = (_dt.datetime.strptime(trade_dt, "%Y-%m-%d") - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        log(f"結算數據日: {trade_dt}（適用日: {pred}）")
         record = build_day(ctx, trade_dt, pred)
         ds = build_dataset(record)
         log(f"已寫 {DATASET_PATH}（days={len(ds['days'])}）")
