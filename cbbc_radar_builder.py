@@ -2,9 +2,9 @@
 """
 牛熊波幅雷達 dataset 生成器（OpenD 版，取代舊 Manus 私有 repo）
 
-每晚 21:30 HKT 跑（由 cbbc_radar_scheduler.py 排程）：
+每朝 08:10 HKT 跑（由 cbbc_radar_scheduler.py 排程，失敗 08:40/09:10 重試）：
   1. HSI / VHSI 收市快照（OpenD）
-  2. 恒指牛熊證名單：Desktop/db/CBBC/ 最新檔（un=='HSI'）
+  2. 恒指牛熊證名單：OpenD get_warrant（HK.800000 全批，status==NORMAL；本地 Desktop/db/CBBC scrape 只做後備）
   3. OpenD 批量快照 → 收回價 + 街貨量（百萬份）
   4. 200 點區間聚合 → 覆蓋分／加權分／判定
   5. 歷史日記錄存 cbbc_radar/days/YYYY-MM-DD.json（append-only），回 5 日
@@ -76,14 +76,47 @@ def latest_cbbc_file():
     return files[0] if files else None
 
 
-def cbbc_codes():
+def cbbc_codes_opend(ctx):
+    """恒指牛熊證名單直接由 OpenD get_warrant 攞（唔使本地 scrape 檔）。"""
+    from futu import RET_OK, WrtType, SortField
+    from futu.quote.quote_get_warrant import Request
+    codes, begin = [], 0
+    while True:
+        req = Request()
+        req.begin = begin
+        req.num = 200
+        req.sort_field = SortField.CODE
+        req.ascend = True
+        req.type_list = [WrtType.BULL, WrtType.BEAR]
+        ret, data = ctx.get_warrant(HSI, req)
+        if ret != RET_OK:
+            raise RuntimeError(f"get_warrant 失敗: {data}")
+        df, last_page, all_count = data
+        if df is None or df.empty:
+            break
+        live = df[df["status"] == "NORMAL"]
+        codes.extend(live["stock"].astype(str).tolist())
+        got = len(df)
+        begin += got
+        if last_page or got < 200:
+            break
+        if all_count is not None and begin >= all_count:
+            break
+        time.sleep(0.3)
+    if not codes:
+        raise RuntimeError("get_warrant 返回 0 隻牛熊證")
+    log(f"恒指牛熊證名單: OpenD get_warrant → {len(codes)} 隻（NORMAL）")
+    return codes, "OpenD get_warrant"
+
+
+def cbbc_codes_local():
     f = latest_cbbc_file()
     if f is None:
         raise RuntimeError("搵唔到 CBBC scrape 檔")
     df = pd.read_parquet(f)
     hsi_df = df[df["un"] == "HSI"]
     codes = ["HK." + s.zfill(5) for s in hsi_df["sym"].astype(str)]
-    log(f"恒指牛熊證名單: {f.name} → {len(codes)} 隻")
+    log(f"恒指牛熊證名單（後備）: {f.name} → {len(codes)} 隻")
     return codes, f.name
 
 
@@ -158,7 +191,11 @@ def build_day(ctx, trading_date, prediction_date=None):
     log(f"HSI 收 {close:,.2f}（{mmdd}，prev_close） VHSI {vhsi*100:.2f} EM±{em1d:.1f} → {lower_day}-{upper_day}")
 
     # ── 牛熊證快照 ──
-    codes, src_file = cbbc_codes()
+    try:
+        codes, src_file = cbbc_codes_opend(ctx)
+    except Exception as e:
+        log(f"⚠️ OpenD 攞名單失敗（{e}）→ 用本地 scrape 後備")
+        codes, src_file = cbbc_codes_local()
     snap = snapshot(ctx, codes)
     snap = snap[snap["wrt_recovery_price"] > 0].copy()
     log(f"快照返回 {len(snap)} 隻（名單 {len(codes)}）")

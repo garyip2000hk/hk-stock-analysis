@@ -276,7 +276,9 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 
 `cbbc_radar_builder.py` — 每晚生成 gsmart-box「牛熊波幅雷達」Dataset JSON：
 - HSI/VHSI 用 OpenD **快照**（`HK.800000` / `HK.800125`，唔用 kline 配額）
-- 恒指牛熊證名單由本地 scrape `Desktop/db/CBBC/cbbc_*.parquet`（`un=='HSI'`）
+- 恒指牛熊證名單**直接由 OpenD `get_warrant`（HK.800000 全批 BULL+BEAR，status==NORMAL，200/頁分頁）**——唔再依賴本地 scrape 檔／Manus Google Sheets；本地 `Desktop/db/CBBC/cbbc_*.parquet` 只做後備（get_warrant 失敗先用）（2026-08-20 改）
+  - 語義同舊版一致：朝早 08:00 跑時 NORMAL 名單 = 當時仲 live 嘅牛熊證（夜間跑會少咗當日已被收回嗰啲，屬預期）
+  - `strategy_lab.py` 仍然讀 `Desktop/db/CBBC` + `Desktop/db/Spot`（Manus Google Sheets pipeline，07:30 `cbbc_warrants_importer.sync_data()` 落地）——呢個係牛熊/窩輪數據最後一個 Manus 依賴
 - batch snapshot（200/批，~8 秒）→ `wrt_recovery_price` + `wrt_street_vol`
 - 每個交易日嘅區間聚合存 `cbbc_radar/days/<date>.json`（append-only），
   `days[]` = 最近 5 日；輸出 `cbbc_radar/dataset_latest.json`
