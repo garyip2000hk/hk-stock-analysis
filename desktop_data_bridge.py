@@ -443,10 +443,28 @@ def load_buyback_list() -> dict:
 
 # ── Main import ─────────────────────────────────────────────
 
+def refresh_public_market_sources() -> dict:
+    """Refresh public sources that otherwise depend on a stale desktop-file sync."""
+    from external_data_sync import sync_cr_signals, sync_short_positions
+
+    results = {}
+    for label, syncer in (("short_positions", sync_short_positions), ("company_registry", sync_cr_signals)):
+        try:
+            results[label] = syncer(OUT_DIR)
+            print(f"[{label}] public refresh {results[label]['status']} → {results[label]['latest_date']}")
+        except Exception as exc:
+            results[label] = {"status": "fallback", "error": str(exc)}
+            print(f"[{label}] public refresh failed; preserving local history: {exc}")
+    _write = OUT_DIR / "public_source_sync.json"
+    with _write.open("w", encoding="utf-8") as handle:
+        json.dump(results, handle, ensure_ascii=False, indent=2)
+    return results
+
 def run_full_import():
     """Run all data imports."""
     print("=== Desktop Data Import ===")
     load_short_positions()
+    refresh_public_market_sources()
     get_short_analysis()
     # announcements.json / quotes.json 改由 sync_announcements_cache.py 同
     # sync_quotes_cache.py 負責（DoD 本地只到 2026-05-22，舊 parser 每日只
@@ -456,6 +474,7 @@ def run_full_import():
     get_announcement_keywords()
     load_cr_data()
     get_cr_signals()
+    refresh_public_market_sources()
     subprocess.run([sys.executable, str(BASE_DIR / "sync_quotes_cache.py")], check=False)
     load_buyback_list()
     print("=== Import complete ===")
