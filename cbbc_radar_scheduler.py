@@ -27,6 +27,9 @@ RUN_AT = (8, 0)
 RETRY_EVERY_MIN = 30
 LAST_RETRY = (9, 10)
 TIMEOUT_SEC = 15 * 60
+# Manus 每日 08:40 會用舊 pipeline 嘅數據覆蓋我哋 08:00 推上 gsmart-box 嘅版本，
+# 所以 08:45 要原檔重推一次（唔重建），確保用戶見到嘅係 Zo 版（新日期語義 + 開市前預判）。
+REPUSH_AT = (8, 45)
 
 
 def log(msg):
@@ -42,6 +45,21 @@ def load_state():
 
 def save_state(state):
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+
+def run_repush():
+    try:
+        proc = subprocess.run(
+            [PY, str(BUILDER), "--push-only"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        log("✗ 重推超時")
+        return False
+    out = (proc.stdout or "").strip()
+    for line in [l for l in out.splitlines() if l.strip()][-4:]:
+        log(f"    {line}")
+    return proc.returncode == 0 and "PUSH_OK" in out
 
 
 def run_builder():
@@ -77,6 +95,16 @@ def main():
 
         due = now.replace(hour=RUN_AT[0], minute=RUN_AT[1], second=0, microsecond=0)
         last = now.replace(hour=LAST_RETRY[0], minute=LAST_RETRY[1], second=0, microsecond=0)
+        repush_due = now.replace(hour=REPUSH_AT[0], minute=REPUSH_AT[1], second=0, microsecond=0)
+
+        # 08:45 重推（Manus 08:40 覆蓋後奪回控制權）；前提是今日已成功 build
+        if day["done"] and not day.get("repushed") and now >= repush_due and now <= last:
+            log("▶ 08:45 重推 dataset（防 Manus 覆蓋）")
+            day["repushed"] = run_repush()
+            log("✓ 重推完成" if day["repushed"] else "✗ 重推失敗（下輪再試）")
+            save_state(state)
+            time.sleep(300)
+            continue
 
         if day["done"] or now < due or now > last:
             # 清舊 state（留 14 日）

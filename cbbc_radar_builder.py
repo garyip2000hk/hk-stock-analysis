@@ -345,7 +345,21 @@ def push(ds):
         return False
 
 
+def push_only():
+    """唔重建，淨係將現有 dataset_latest.json 重新 POST 上 gsmart-box。
+    用途：Manus 08:40 會用舊數據覆蓋我哋 08:00 推嘅版本，08:45 重推一次確保我哋嘅先係最終。"""
+    if not DATASET_PATH.exists():
+        log(f"REPUSH_FAIL: 搵唔到 {DATASET_PATH}")
+        return 1
+    ds = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
+    day0 = ds["days"][0]
+    log(f"重推 dataset（generatedAt={ds.get('generatedAt')} date={day0['date']} predictionDate={day0.get('predictionDate')}）")
+    return 0 if push(ds) else 1
+
+
 def main():
+    if "--push-only" in sys.argv:
+        return push_only()
     from futu import OpenQuoteContext
     now_hkt = datetime.now(HKT)
     today = now_hkt.strftime("%Y-%m-%d")
