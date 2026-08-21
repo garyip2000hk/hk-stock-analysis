@@ -16,9 +16,17 @@
   distanceWeight   = max(0.15, 1 − |mid−close| / EM)
   coverageScore    = (bearCovered − bullCovered) / Σ
   weightedScore    = (Σ bear加權 − Σ bull加權) / Σ
+
+「先」「後」方向（HSI ADR CK sheet 邏輯，2026-08-21 移植）：
+  先 = 夜期變化 + HSIADR 指數變化，±50 點 AND 規則（兩邊同向過 50 先有方向；任一邊 ≤50 → 窄幅）
+  後 = 相對期指張數（街貨 ÷ 換股比率 ÷ 50，GS 口徑，已 19/19 對數驗證）：
+       動態 200 點格（anchor=round(close,100)，同 GS 表）、上下各 3 個最近格、
+       格遠邊距離 < DayRange(=(High−Low)/2) 先計入；upSum − downSum > +500 屠熊 / < −500 殺牛
 """
 import json
+import re
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -35,6 +43,8 @@ CBBC_DB = Path("/home/workspace/Desktop/db/CBBC")
 HSI = "HK.800000"
 VHSI = "HK.800125"
 NIGHT_FUT = "HK.HSImain"
+HSIADR_URL = "https://www.futunn.com/hk/index/.HSIADR-US"
+SIGNAL_THRESHOLD = 50.0  # 「HSI ADR CK」sheet：±50 點先算有方向（AND 規則）
 # 恒指成分嘅美股 ADR 代理籃（按恒指約數權重 % 加權，權重季度檢視；OpenD 攞日 K 收市）。
 # ⚠️ 唔可以用等權中概籃（2026-08-21 教訓：網易 -5.9%/B站 -3.8% 等細權重股拖到等權 -1.02% →
 # 假訊號 -262 點；同一晚加權只係 +4.8 點）。非恒指成分（PDD/NIO/BEKE）唔入籃。
@@ -134,6 +144,68 @@ def cbbc_codes_local():
     return codes, f.name
 
 
+def fetch_hsiadr():
+    """富途恒指 ADR 指數（.HSIADR-US）。「HSI ADR CK」sheet 同源嘅 futunn 頁面
+    （OpenD 唔支援美股指數報價，實測 get_market_snapshot 回「暂不支持美股指数」）。
+    頁面個變化 = HSIADR 值 − HSI 昨日日市收，同 sheet C4 同一口徑。
+    回 (指數值, 帶符號變化) 或 None。"""
+    try:
+        out = subprocess.run(
+            ["curl", "-sL", "--max-time", "15",
+             "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+             HSIADR_URL],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+    except Exception as e:
+        log(f"⚠️ futunn HSIADR 抓取失敗: {e}")
+        return None
+    m = re.search(r"mg-r-8 price direct-(?:up|down)[^>]*>\s*([\d,\.]+)", out)
+    c = re.search(r"change-price\"[^>]*>\s*([+-])\s*([\d\.]+)", out)
+    if not (m and c):
+        log("⚠️ futunn HSIADR 頁面 parse 唔到價格/變化（結構改咗？）")
+        return None
+    val = float(m.group(1).replace(",", ""))
+    chg = float(c.group(2)) * (1 if c.group(1) == "+" else -1)
+    log(f"HSIADR 指數: {val:,.1f}（{chg:+.1f} 點，futunn）")
+    return val, round(chg, 1)
+
+
+def _sheet_back_direction(snap, close, day_range):
+    """「HSI ADR CK」sheet 嘅「後」方向（GS 相對期指張數邏輯）：
+    - 動態 200 點格：anchor = round(close,100)，同 GS 街貨分佈表格線一致
+    - 上方（熊區）最近 3 格、下方（牛區）最近 3 格
+    - 可達：上方格 (格頂−close) < DayRange；下方格 (close−格底) < DayRange
+    - upSum − downSum > +500 → 屠熊；< −500 → 殺牛；否則窄幅"""
+    anchor = round(close / 100) * 100
+    up_sum = dn_sum = 0.0
+    up_zones, dn_zones = [], []
+    up = snap[snap["wrt_recovery_price"] > close]
+    dn = snap[snap["wrt_recovery_price"] < close]
+    if len(up):
+        g = up.assign(z=up["wrt_recovery_price"].map(lambda x: int(anchor + (x - anchor) // 200 * 200))).groupby("z")["contracts"].sum()
+        for z in sorted([k for k in g.index if k >= anchor])[:3]:
+            reach = (z + 199) - close
+            n = float(g[z])
+            up_zones.append({"lo": int(z), "hi": int(z + 199), "contracts": round(n, 1),
+                             "reach": round(reach, 1), "counted": bool(reach < day_range)})
+            if reach < day_range:
+                up_sum += n
+    if len(dn):
+        g = dn.assign(z=dn["wrt_recovery_price"].map(lambda x: int(anchor + (x - anchor) // 200 * 200))).groupby("z")["contracts"].sum()
+        for z in sorted([k for k in g.index if k < anchor], reverse=True)[:3]:
+            reach = close - z
+            n = float(g[z])
+            dn_zones.append({"lo": int(z), "hi": int(z + 199), "contracts": round(n, 1),
+                             "reach": round(reach, 1), "counted": bool(reach < day_range)})
+            if reach < day_range:
+                dn_sum += n
+    diff = up_sum - dn_sum
+    label = "上屠熊" if diff > 500 else ("下殺牛" if diff < -500 else "窄幅波動")
+    return {"dayRange": round(day_range, 1), "upSum": round(up_sum, 1), "downSum": round(dn_sum, 1),
+            "diff": round(diff, 1), "upZones": up_zones, "downZones": dn_zones, "label": label}
+
+
 def _adr_proxy_change(ctx, prediction_date, close):
     """恒指 ADR 代理：恒指成分美股 ADR 按恒指權重加權嘅隔夜變化 × HSI close。
     用日 K 收市計（美股快照 update_time 個 field 係壞嘅，唔可靠）；日 K 攞唔到先後備快照。
@@ -212,37 +284,46 @@ def previous_night_premarket(ctx, trading_date, prediction_date, close):
             else:
                 log(f"夜期快照時間唔啱（update_time={upd}，預期 {trading_date} 17:00–翌日 03:05）或價為 0，當無訊號處理")
 
+        # ADR 主源：富途 HSIADR 指數（「HSI ADR CK」sheet 同源；頁面個變化 = HSIADR − HSI 昨收）。
+        # OpenD 唔支援美股指數報價 → 抓唔到先後備恒指權重加權 ADR 籃（OpenD 美股）。
         adr_change = None
+        adr_src = "ADR 代理籃（OpenD）"
         try:
-            adr_change = _adr_proxy_change(ctx, prediction_date, close)
+            hsiadr = fetch_hsiadr()
         except Exception as e:
-            log(f"⚠️ ADR 代理計唔到: {e}")
-
-        # 方向判定（用戶規則 2026-08-21）：夜期同 ADR 各自要 |升跌| > 100 點先算有方向，
-        # 唔夠 100 點當無訊號 → 先窄幅波動；兩邊同向 >100 = 確認；相反 → 取幅度大嗰邊（唔確認）。
-        sigs = []
-        if night_change is not None and abs(night_change) > 100:
-            sigs.append((night_change, "夜期"))
-        if adr_change is not None and abs(adr_change) > 100:
-            sigs.append((adr_change, "ADR"))
-        if not sigs:
-            direction, confirmed, adjustment = None, False, 0.0
+            log(f"⚠️ HSIADR 抓取異常: {e}")
+            hsiadr = None
+        if hsiadr is not None:
+            adr_change = hsiadr[1]
+            adr_src = "HSIADR 指數（futunn）"
         else:
-            dirs = {("up" if c > 0 else "down") for c, _ in sigs}
-            if len(dirs) == 1:
-                direction = dirs.pop()
-                confirmed = len(sigs) == 2
-                # adjustment 跟「過 100 點嘅訊號邊」；兩邊同向就優先夜期（直接關聯 HSI）
-                if len(sigs) == 2 and night_change is not None and abs(night_change) > 100:
-                    adjustment = night_change
-                else:
-                    adjustment = sigs[0][0]
-            else:
-                win = max(sigs, key=lambda s: abs(s[0]))
-                direction, confirmed, adjustment = ("up" if win[0] > 0 else "down"), False, win[0]
-        src = "夜期+ADR（OpenD）" if adr_change is not None else "夜期（OpenD）"
+            try:
+                adr_change = _adr_proxy_change(ctx, prediction_date, close)
+            except Exception as e:
+                log(f"⚠️ ADR 代理計唔到: {e}")
+
+        # 方向判定（「HSI ADR CK」sheet 規則 2026-08-21）：±50 點，AND 條件 —
+        # 先跌 = ADR < −50 且 夜期 < −50；先升 = ADR > 50 且 夜期 > 50；
+        # 任何一邊 |變化| ≤ 50 → 先窄幅波動（OR 條件）；兩邊過 50 但相反 → 窄幅（sheet 冇定義，保守處理）。
+        # 得一邊有數據時照計嗰邊（confirmed=False 標明數據唔齊）。
+        direction = confirmed = None
+        adjustment = 0.0
+        t = SIGNAL_THRESHOLD
+        if night_change is not None and adr_change is not None:
+            if night_change > t and adr_change > t:
+                direction, confirmed, adjustment = "up", True, night_change
+            elif night_change < -t and adr_change < -t:
+                direction, confirmed, adjustment = "down", True, night_change
+        elif night_change is not None:
+            if abs(night_change) > t:
+                direction, adjustment = ("up" if night_change > 0 else "down"), night_change
+        elif adr_change is not None:
+            if abs(adr_change) > t:
+                direction, adjustment = ("up" if adr_change > 0 else "down"), adr_change
+        src = f"夜期（OpenD）+ {adr_src}"
         return {
             "adrChange": None if adr_change is None else round(adr_change, 1),
+            "adrSource": adr_src,
             "nightFuturesChange": None if night_change is None else round(night_change, 1),
             "adjustment": round(adjustment, 1),
             "initialDirection": direction,
@@ -296,9 +377,14 @@ def build_day(ctx, trading_date, prediction_date=None):
     snap = snap[snap["wrt_recovery_price"] > 0].copy()
     log(f"快照返回 {len(snap)} 隻（名單 {len(codes)}）")
 
+    # 相對期指張數（GS 口徑，2026-08-21 對 gswarrants 官方表驗證 19/19 全中）：
+    # 街貨量 ÷（換股比率 × 50）；「後」方向判定（HSI ADR CK sheet 邏輯）用呢個而唔係百萬份街貨。
+    ratio = snap["wrt_conversion_ratio"].where(snap["wrt_conversion_ratio"] > 0)
+    snap["contracts"] = (snap["wrt_street_vol"] / (ratio * 50.0)).fillna(0.0)
+
     # ── 區間聚合 ──
     snap["zone_lo"] = (snap["wrt_recovery_price"] // ZONE_SIZE * ZONE_SIZE).astype(int)
-    agg = snap.groupby("zone_lo").agg(out=("wrt_street_vol", "sum"), n=("code", "count"))
+    agg = snap.groupby("zone_lo").agg(out=("wrt_street_vol", "sum"), n=("code", "count"), contracts=("contracts", "sum"))
     zones = []
     bull_covered = bear_covered = bull_w = bear_w = 0.0
     for lo in sorted(agg.index):
@@ -325,6 +411,7 @@ def build_day(ctx, trading_date, prediction_date=None):
         zones.append({
             "lo": int(lo), "hi": int(hi), "mid": mid,
             "outstanding": round(out, 2), "note": "",
+            "contracts": round(float(agg.loc[lo, "contracts"]), 1),
             "side": side,
             "overlapFraction": round(ov_frac, 4),
             "coveredAmount": round(cov_amt, 4),
@@ -341,14 +428,15 @@ def build_day(ctx, trading_date, prediction_date=None):
     coverage_score = ((bear_covered - bull_covered) / total_cov) if total_cov else 0
     weighted_score = ((bear_w - bull_w) / total_w) if total_w else 0
 
-    # ── 判定：「後」方向用當日 08:00 結算牛熊數據；「先」方向用前一晚夜期+ADR ──
+    # ── 判定（「HSI ADR CK」sheet 邏輯 2026-08-21）──
+    # 「後」：DayRange =（昨日 High−Low）/2（日 K 攞唔到就後備 EM）；上下各 3 個最近 200 點格，
+    # 可達先計入；相對期指張數 upSum − downSum ±500 定屠熊／殺牛／窄幅。
     premarket = previous_night_premarket(ctx, trading_date, prediction_date or trading_date, close)
-    if weighted_score >= 0.25:
-        back = "上屠熊"
-    elif weighted_score <= -0.25:
-        back = "下殺牛"
-    else:
-        back = "窄幅波動"
+    day_range = (high - low) / 2 if (high and low and high > low) else em1d
+    sheet_back = _sheet_back_direction(snap, close, day_range)
+    back = sheet_back["label"]
+    log(f"sheet 後向: up {sheet_back['upSum']:.0f} vs down {sheet_back['downSum']:.0f} "
+        f"(diff {sheet_back['diff']:+.0f}, DayRange {sheet_back['dayRange']:.0f}) → {back}")
     if premarket:
         d0 = premarket.get("initialDirection")
         if d0:
@@ -386,6 +474,7 @@ def build_day(ctx, trading_date, prediction_date=None):
         "bullWeighted": round(bull_w, 4), "bearWeighted": round(bear_w, 4),
         "coverageScore": round(coverage_score, 4), "weightedScore": round(weighted_score, 4),
         "verdict": verdict, "premarket": premarket, "targetFocus": target_focus,
+        "sheetBack": sheet_back,
         # 信號應用日 = 信號日本身（08:10 已用當日 08:00 結算數據，唔再順延）
         "predictionDate": prediction_date or trading_date,
     }
@@ -411,7 +500,7 @@ def build_dataset(record):
     ds = {
         "generatedAt": now,
         "refreshedAt": now,
-        "sourceNote": "每個交易日 08:00（HKT）用昨日結算牛熊數據判當日；「先」向按前晚夜期及恒指權重加權 ADR 代理（OpenD）；08:45 重算 premarket 再推一次。",
+        "sourceNote": "每個交易日 08:00（HKT）用昨日結算牛熊數據判當日；「先」向按前晚夜期（OpenD）+ HSIADR 指數（futunn，後備=恒指權重加權 ADR 籃）±50 AND 規則；「後」向用相對期指張數上下各 3 區 ±500 規則（HSI ADR CK sheet 邏輯，OpenD 計）；08:45 重算 premarket 再推一次。",
         "availableDates": [d["date"] for d in days if days],
         "days": days,
     }
@@ -480,8 +569,9 @@ def refresh_premarket():
         ctx.close()
     if pm and _pm_quality(pm) > _pm_quality(day0.get("premarket")):
         day0["premarket"] = pm
-        ws = day0.get("weightedScore", 0)
-        back = "上屠熊" if ws >= 0.25 else ("下殺牛" if ws <= -0.25 else "窄幅波動")
+        sb = day0.get("sheetBack") or {}
+        back = sb.get("label") or ("上屠熊" if day0.get("weightedScore", 0) >= 0.25
+                                   else ("下殺牛" if day0.get("weightedScore", 0) <= -0.25 else "窄幅波動"))
         d0 = pm.get("initialDirection")
         day0["verdict"] = (
             f"先{'升' if d0 == 'up' else '跌'}後{back}" if d0

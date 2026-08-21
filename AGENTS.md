@@ -293,7 +293,13 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 `weightedContribution = covered × distanceWeight`；
 scores=(bear−bull)/sum；verdict 用 weightedScore ±0.25 定型（唔再靠 AI）。
 zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（street_vol/1e6）。
-`premarket`「先」向判定規則（2026-08-21 用戶定）：夜期（HSImain 夜市收 vs 日市收）同 ADR 代理**各自**睇——任何一邊 |升跌| > 100 點先有方向訊號（偏向該邊方向），兩邊都唔夠 100 點 = 「先窄幅波動」（initialDirection=null）；兩邊都 >100 同向 = isConfirmed；兩邊 >100 但相反 = 取幅度較大一方、唔確認。`adjustment` 跟訊號邊（唔夠 100 點嗰邊唔用）。舊邏輯「夜期 -2 點都當同向確認」係錯，已廢。**ADR 代理必須按恒指權重加權**（阿里8%/匯控7.5%/網易1.5%…美股日K收市計，覆蓋約20%恒指權重）——等權中概籃會俾細權重股拖歪（08-21 教訓：網易-5.9%/B站-3.8% 拖到等權 -1.02% → 假 -262 點「先跌」；加權後同一晚 +5 點）；非恒指成分（PDD/NIO/BEKE）唔入籃。
+**「先」「後」判定（2026-08-21 改用用戶 Google Sheet「HSI ADR CK」工作頁邏輯，已移植入 builder）**：
+- 「先」（`previous_night_premarket`）：夜期（HSImain 夜市收 vs 日市收，OpenD）+ **HSIADR 指數變化**。±50 點 **AND 規則**——先跌 = ADR < −50 **且** 夜期 < −50；先升 = ADR > 50 **且** 夜期 > 50；任何一邊 |變化| ≤ 50 → 先窄幅波動（OR）；兩邊過 50 但相反 → 窄幅（sheet 冇定義，保守）。得一邊有數據時照計嗰邊（confirmed=False）。
+  - **HSIADR 數據源**：OpenD 唔支援美股指數報價（get_market_snapshot 回「暂不支持美股指数」），所以主源 = sheet 同款 futunn 頁面 `https://www.futunn.com/hk/index/.HSIADR-US` curl scrape（regex `mg-r-8 price direct-up/down` + `change-price`；頁面個變化 = HSIADR − HSI 昨日日市收，同 sheet C4 同口徑）；scrape 失敗先後備 `ADR_BASKET` 恒指權重加權籃（OpenD 美股，覆蓋~20% 權重只係方向代理）。`premarket.adrSource` 標明用咗邊個源。
+- 「後」（`_sheet_back_direction`，存 `sheetBack`）：GS 相對期指張數邏輯——動態 200 點格（anchor=round(close,100)，同 sheet 標籤格線一致），上下各取最近 3 格；可達條件 = 上方格（格頂−close）< DayRange、下方格（close−格底）< DayRange，其中 **DayRange =（昨日 High−Low）/2**（日 K；攞唔到後備 EM=close×VHSI/√252）；相對期指張數 upSum−downSum > +500 → 上屠熊、< −500 → 下殺牛、否則窄幅。
+  - **相對期指張數 = 街貨量 ÷（換股比率 × 50）**，2026-08-21 對 gswarrants 官方表（hsi-cbbc-outstanding-distribution）對數 19/19 全中（遠區誤差 ≤0.3%），完全由 OpenD 計，唔使依賴 GS scrape。近現價區會因即日收回/數據日差異有出入，屬預期。
+  - ⚠️ 用戶 sheet 本身有 stale-label 缺陷：D 欄區間標籤（25,700-25,899 式）同 GS 實際表（25,800-25,999 式固定格）唔齊，下方最近區標成 25,000（實際 25,500-25,699），令 F 欄距離長期高估 → down_sum 成日當 0。移植版用乾淨數據重新 bin，冇呢個問題（同一日 sheet 話「後向上」，乾淨數據會係「後窄幅」——08-20 close 25,698 案例 diff=+320）。
+- 舊規則（±100 OR、weightedScore ±0.25 判後向）已廢；weightedScore 仍然計（targetFocus 用）。`refresh_premarket`（08:45）重組 verdict 時後向改讀 `day0["sheetBack"]`。
 
 `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每日 21:30 HKT 跑，
 失敗 22:00/22:30 重試。entrypoint 用 `bash -c 'source /root/.zo_secrets; ...'`
@@ -305,7 +311,7 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
 - `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑（失敗 08:40/09:10 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`；**08:45 重算 premarket（`--refresh-premarket`：夜期/ADR 朝早未齊就補，覆蓋變好先改 dataset 同 verdict）再重推一次**—— Manus 舊 pipeline 仍每日 08:40 推舊格式數據覆蓋，重推保證我哋係最終版本；根治要喺 Manus 停咗佢個每日推送任務
 - **密鑰喺 `stock-analysis/.cbbc_radar_secrets`**（chmod 600，已 gitignore）——平台 Secrets 同步有延遲/唔可靠，排程器 entrypoint 係 source `/root/.zo_secrets` 再 source 呢個檔
 - **⚠️ Manus edge WAF 會 403 擋 Python-urllib 預設 UA**（唔係密鑰錯！密鑰錯係 401）——push 一定要帶 browser UA header
-- 盤前 premarket（夜期+ADR，2026-08-21 定案）：**夜期用 HSImain 快照**（朝早 08:00 跑時 `last_price`=尋晚 T+1 段收、`prev_close`=昨日日市收；時間窗驗證用**結算日 17:00～翌日 03:05** 做基準——週五晚嗰節夜市收喺週六 03:00，用 prediction_date 做基準會喺週一漏咗；開市後 live 價亦會被呢個窗擋走）——⚠️ 唔好用 futu 期貨歷史 K線，T+1 夜期段延遲入庫，朝早跑根本未有尋晚 bars（曾因此攞錯舊夜期 → 假 −256.9）。**ADR 代理用恒指權重加權美股 ADR 籃**（阿里8/匯控7.5/網易1.5/JD1/百度0.8/理想0.4/B站0.3/小鵬0.2/中通0.2/攜程0.2，`ADR_BASKET` dict，權重係約數要季度檢視；美股**日K收市**計，日K攞唔到先後備快照；覆蓋權重<15% 當無數據）——⚠️ 唔可以等權（08-21 教訓：等權中概籃俾網易-5.9%/B站-3.8% 拖到 -262 點假「先跌」，加權後同晚 +5 點；美股快照 update_time 個 field 係壞嘅唔好信）。方向規則：任何一邊 |升跌| >100 點先算訊號，兩邊都唔夠 = 先窄幅波動。HSI open/high/low 一樣由日 K 攞（快照開市前未更新、開市後歸零）
+- 盤前 premarket（2026-08-21 第二次定案：改用「HSI ADR CK」sheet 邏輯，詳見上面公式段）：**夜期用 HSImain 快照**（朝早 08:00 跑時 `last_price`=尋晚 T+1 段收、`prev_close`=昨日日市收；時間窗驗證用**結算日 17:00～翌日 03:05** 做基準——週五晚嗰節夜市收喺週六 03:00，用 prediction_date 做基準會喺週一漏咗；開市後 live 價亦會被呢個窗擋走）——⚠️ 唔好用 futu 期貨歷史 K線，T+1 夜期段延遲入庫，朝早跑根本未有尋晚 bars（曾因此攞錯舊夜期 → 假 −256.9）。**ADR 主源 = futunn HSIADR 指數頁 scrape**（OpenD 無美股指數；後備 = `ADR_BASKET` 恒指權重加權籃，等權教訓：網易-5.9%/B站-3.8% 拖到假 -262 點）。方向規則：±50 AND（兩邊同向過 50 先有方向，任何一邊唔夠 = 先窄幅）。HSI open/high/low 一樣由日 K 攞（快照開市前未更新、開市後歸零）
 - ⚠️ **close 用 HSI 歷史日 K 攞 trade_dt 收市，唔用快照 `prev_close_price`**（朝早 08:00 快照 prev_close 可能仲係前日，08-21 實測攞到 25,495 而真實 08-20 收係 25,698，相差 200 點）；快照 prev_close 只做後備。open/high/low 仍用快照（朝早跑時係昨日全日數值）
 
 ## 期權策略真回測 vs 舊代理／舊鐵鷹回測（2026-08-17 對帳）

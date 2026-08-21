@@ -1,0 +1,547 @@
+#!/usr/local/bin/python3
+# -*- coding: utf-8 -*-
+"""
+HSI Short Strangle 全/半自動服務（Futu OpenD 版）
+
+用 gsmart-box「Short Strangle 戰情室」邏輯（VHSI 分級 + 牛熊證風控），
+透過 OpenD 取恒指期權即市數據，提供：
+  GET  /health
+  GET  /signal            今日訊號（mode / K / L / 合約 / BS勝率 / 回測勝率）
+  GET  /positions         持倉 + 實時 P&L + 平倉建議
+  GET  /track             預測 vs 實際勝率（回測 + 前向 paper 記錄）
+  GET  /config
+  POST /config            {auto_mode: full|semi, enabled}
+  POST /order             {mode, lots, confirm, dry_run}  開倉（PAPER 記錄 或 REAL 經 OpenD）
+  POST /close             {position_id, qty, confirm}     平倉
+
+狀態：hsi_state.json（config + positions）；實際戰績：hsi_track.json（paper 前向）。
+唔好喺度放任何密碼；REAL 解鎖靠環境變數 FUTU_TRADE_PWD。
+"""
+
+import json
+import os
+import threading
+import time
+import traceback
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+import futu
+from futu import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdSide, OrderType, RET_OK
+
+import hsi_strangle as hs
+import bs as bsx
+
+OPEND_HOST = os.environ.get("OPEND_HOST", "127.0.0.1")
+OPEND_PORT = int(os.environ.get("OPEND_PORT", "11111"))
+LISTEN_PORT = int(os.environ.get("PORT", "8891"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_PATH = os.path.join(BASE_DIR, "hsi_state.json")
+TRACK_PATH = os.path.join(BASE_DIR, "hsi_track.json")
+BACKTEST_PATH = os.path.join(BASE_DIR, "hsi_bs_backtest.json")
+
+MULT = 50.0          # 恒指期權每點 HK$50
+LOT = MULT           # 1 張 = $50/點
+HK_PER_PT = 50.0
+
+# ---------------------------------------------------------------------------
+# 狀態
+# ---------------------------------------------------------------------------
+_state_lock = threading.Lock()
+
+
+def _now_iso():
+    return hs.now_hkt().isoformat()
+
+
+def _load(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def load_state():
+    with _state_lock:
+        return _load(STATE_PATH, {"config": {"auto_mode": "semi", "enabled": True, "lots": 1}, "positions": []})
+
+
+def save_state(state):
+    with _state_lock:
+        _save(STATE_PATH, state)
+
+
+def load_track():
+    return _load(TRACK_PATH, {"predictions": [], "resolved": []})
+
+
+def save_track(t):
+    _save(TRACK_PATH, t)
+
+
+# ---------------------------------------------------------------------------
+# OpenD quote ctx（每 call 一條，快 + 安全；quote 唔使解鎖）
+# ---------------------------------------------------------------------------
+def quote_ctx():
+    return hs.connect()
+
+
+_trade_ctx = None
+_trade_lock = threading.Lock()
+_unlocked = {"REAL": False}
+
+
+def trade_ctx():
+    global _trade_ctx
+    with _trade_lock:
+        if _trade_ctx is None:
+            _trade_ctx = OpenSecTradeContext(host=OPEND_HOST, port=OPEND_PORT, security_firm=SecurityFirm.FUTUSECURITIES)
+        return _trade_ctx
+
+
+def reset_trade_ctx():
+    global _trade_ctx
+    with _trade_lock:
+        try:
+            if _trade_ctx:
+                _trade_ctx.close()
+        except Exception:
+            pass
+        _trade_ctx = None
+        _unlocked["REAL"] = False
+
+
+def ensure_unlocked():
+    if _unlocked["REAL"]:
+        return
+    pwd = os.environ.get("FUTU_TRADE_PWD")
+    if not pwd:
+        raise RuntimeError("FUTU_TRADE_PWD 未設定（去 Zo Secrets 加返先可以真落單）")
+    ret, data = trade_ctx().unlock_trade(pwd)
+    if ret != RET_OK:
+        raise RuntimeError(f"解鎖交易失敗: {data}")
+    _unlocked["REAL"] = True
+
+
+def real_account():
+    ret, df = trade_ctx().get_acc_list()
+    if ret != RET_OK:
+        raise RuntimeError(f"攞唔到戶口: {df}")
+    for _, r in df.iterrows():
+        if str(r.get("trd_env", "")).upper() == "REAL" and str(r.get("acc_status", "")).upper() == "ACTIVE":
+            return str(r["acc_id"])
+    raise RuntimeError("冇 ACTIVE 嘅 REAL 戶口")
+
+
+# ---------------------------------------------------------------------------
+# 訊號計算（重用 hsi_strangle）
+# ---------------------------------------------------------------------------
+def _bs_winprob(spot, vhsi, dte, K, L, mode):
+    sigma = vhsi / 100.0
+    t = max(dte, 1) / 365.0
+    if mode == "SKIP":
+        return None
+    if mode == "Full":
+        pl = bsx.prob_touch(spot, K, t, sigma) or 0.0   # 觸上沿
+        ps = bsx.prob_touch(spot, L, t, sigma) or 0.0   # 觸下沿
+        return round(max(0.0, 1.0 - pl - ps) * 100, 1)
+    # PutOnly：贏 = 期內唔觸下沿 L
+    return round(max(0.0, 1.0 - (bsx.prob_touch(spot, L, t, sigma) or 0.0)) * 100, 1)
+
+
+def _backtest_winrate(mode):
+    try:
+        bt = _load(BACKTEST_PATH, {})
+        d = bt.get("results", {}).get("dte5", {}).get("gated", {}).get("by_mode", {})
+        m = d.get(mode)
+        if m:
+            return m.get("win_rate_pct"), m.get("avg_pnl_hkd")
+    except Exception:
+        pass
+    return None, None
+
+
+def compute_signal():
+    ctx = quote_ctx()
+    try:
+        vhsi, hsi = hs.get_index_snapshot(ctx)
+        mode = hs.detect_mode(vhsi)
+        friday = hs.is_friday()
+        dte = 5
+        cfg = hs.MODE_CONFIGS.get(mode, {})
+        if cfg.get("dte"):
+            dte = cfg["dte"]
+        strikes = hs.calc_strikes(hsi, vhsi, mode)
+        K, L = strikes.get("K"), strikes.get("L")
+        expiry = None
+        contracts = {}
+        atm_iv_val = None
+        if mode != "SKIP" and (K or L):
+            exp = hs.pick_expiry(ctx)
+            expiry = exp.strftime("%Y-%m-%d") if hasattr(exp, "strftime") else str(exp)[:10]
+            chain = hs.pull_chain(ctx, expiry)
+            if chain is not None:
+                atm_iv_val = hs.atm_iv(chain, hsi)
+                if K:
+                    contracts["call"] = hs.find_contract(chain, "CALL", K)
+                if L:
+                    contracts["put"] = hs.find_contract(chain, "PUT", L)
+        bs_win = _bs_winprob(hsi, vhsi, dte, K, L, mode) if (K or L) else None
+        bt_win, bt_ev = _backtest_winrate(mode)
+        return {
+            "time": _now_iso(), "vhsi": round(vhsi, 2), "hsi": round(hsi, 2),
+            "mode": mode, "mode_label": hs.MODE_CONFIGS.get(mode, {}).get("label", mode),
+            "friday": friday, "dte": dte, "expiry": expiry,
+            "strikes": {"em": round(strikes.get("em", 0), 1), "K": K, "L": L},
+            "atm_iv": atm_iv_val, "contracts": contracts,
+            "bs_winprob": bs_win, "backtest_winrate": bt_win, "backtest_ev": bt_ev,
+        }
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 期權代碼 + 落單
+# ---------------------------------------------------------------------------
+def option_code(expiry_iso, cp, strike):
+    yymmdd = expiry_iso.replace("-", "")[2:]
+    return f"HK.HSI{yymmdd}{cp.upper()}{int(round(float(strike) * 1000))}"
+
+
+def place_real_order(code, qty, side, price):
+    ensure_unlocked()
+    acc = real_account()
+    ret, data = trade_ctx().place_order(
+        price=price, qty=qty, code=code,
+        trd_side=TrdSide.SELL if side == "SELL" else TrdSide.BUY,
+        order_type=OrderType.NORMAL, trd_env=TrdEnv.REAL,
+        acc_id=acc, remark="hsi-strangle",
+    )
+    if ret != RET_OK:
+        return {"success": False, "error": str(data)}
+    oid = None
+    try:
+        oid = str(data["orderid"].iloc[0])
+    except Exception:
+        oid = str(data)
+    return {"success": True, "order_id": oid}
+
+
+def mid_or_last(c):
+    if not c:
+        return None
+    bid, ask, last = c.get("bid"), c.get("ask"), c.get("last")
+    if bid and ask and bid > 0 and ask > 0:
+        return round((bid + ask) / 2.0, 1)
+    return last
+
+
+def open_position(sig, lots, real):
+    legs = []
+    orders = []
+    mode = sig["mode"]
+    K, L = sig["strikes"]["K"], sig["strikes"]["L"]
+    expiry = sig["expiry"]
+    if mode == "Full":
+        legs.append({"cp": "CALL", "strike": K, "code": option_code(expiry, "C", K),
+                     "px": mid_or_last(sig["contracts"].get("call"))})
+    legs.append({"cp": "PUT", "strike": L, "code": option_code(expiry, "P", L),
+                 "px": mid_or_last(sig["contracts"].get("put"))})
+    if real:
+        for leg in legs:
+            r = place_real_order(leg["code"], lots, "SELL", leg["px"] or 0)
+            orders.append({"code": leg["code"], **r})
+            if not r["success"]:
+                return {"success": False, "error": f"{leg['code']} 落單失敗: {r['error']}", "orders": orders}
+            time.sleep(2.2)
+    pos = {
+        "id": f"P{int(time.time())}", "mode": mode, "opened_at": _now_iso(),
+        "expiry": expiry, "lots": lots, "real": bool(real),
+        "hsi_at_open": sig["hsi"], "vhsi_at_open": sig["vhsi"],
+        "legs": legs, "orders": orders, "status": "OPEN",
+        "premium_pts": round(sum((l["px"] or 0) for l in legs), 1),
+    }
+    return {"success": True, "position": pos}
+
+
+# ---------------------------------------------------------------------------
+# 平倉建議 + P&L
+# ---------------------------------------------------------------------------
+def suggest_close(pos, pnl_pts, hsi_now, days_left):
+    """回傳 {"key": 面板SUGGEST鍵, "reason": 原因}。"""
+    prem = pos.get("premium_pts", 0)
+    if days_left is not None and days_left <= 1:
+        return {"key": "平倉-臨近到期", "reason": f"剩 {max(days_left,0)} 日到期，避免到期風險"}
+    call_leg = next((l for l in pos["legs"] if l["cp"] == "CALL"), None)
+    put_leg = next((l for l in pos["legs"] if l["cp"] == "PUT"), None)
+    if call_leg and hsi_now >= call_leg["strike"]:
+        return {"key": "平倉-止蝕", "reason": f"恒指 {hsi_now:.0f} 升穿上沿 {call_leg['strike']:.0f}"}
+    if put_leg and hsi_now <= put_leg["strike"]:
+        return {"key": "平倉-止蝕", "reason": f"恒指 {hsi_now:.0f} 跌破下沿 {put_leg['strike']:.0f}"}
+    if prem > 0 and pnl_pts >= prem * 0.5:
+        return {"key": "平倉-止賺", "reason": f"已賺權金 {pnl_pts:.0f}/{prem:.0f} 點（≥50%），可止賺"}
+    return {"key": "持有", "reason": "價位喺區間內，未到期"}
+
+
+def positions_view():
+    st = load_state()
+    open_pos = [x for x in st.get("positions", []) if x.get("status") == "OPEN"]
+    hsi_now = None
+    ctx = None
+    chains = {}
+    if open_pos:
+        try:
+            ctx = quote_ctx()
+            _, hsi_now = hs.get_index_snapshot(ctx)
+        except Exception:
+            hsi_now = None
+    out = []
+    try:
+        for pos in open_pos:
+            prem = pos.get("premium_pts", 0)
+            lots = pos.get("lots", 1)
+            expiry = pos.get("expiry")
+            days_left = None
+            try:
+                days_left = (datetime.strptime(expiry, "%Y-%m-%d") - hs.now_hkt().replace(tzinfo=None)).days
+            except Exception:
+                pass
+            # 真實 P&L：逐腿用實時期權鏈買回價（short 要買返，用 ask）
+            pnl_pts = None
+            if ctx is not None and expiry:
+                try:
+                    if expiry not in chains:
+                        chains[expiry] = hs.pull_chain(ctx, expiry)
+                    chain = chains[expiry]
+                    if chain is not None:
+                        buyback = 0.0
+                        ok = True
+                        for leg in pos["legs"]:
+                            c = hs.find_contract(chain, leg["cp"], leg["strike"])
+                            if not c:
+                                ok = False
+                                break
+                            buyback += (c.get("ask") or c.get("bid") or 0)
+                        if ok:
+                            pnl_pts = round(prem - buyback, 1)
+                except Exception:
+                    pnl_pts = None
+            # fallback：冇鏈就用內在值
+            if pnl_pts is None and hsi_now is not None:
+                intrinsic = sum(
+                    max(0.0, (hsi_now - l["strike"]) if l["cp"] == "CALL" else (l["strike"] - hsi_now))
+                    for l in pos["legs"]
+                )
+                pnl_pts = round(prem - intrinsic, 1)
+            pnl_hkd = round(pnl_pts * HK_PER_PT * lots, 0) if pnl_pts is not None else None
+            suggest = suggest_close(pos, pnl_pts, hsi_now, days_left) if hsi_now is not None else {"key": "持有", "reason": "未有即市數據"}
+            out.append({
+                "id": pos["id"],
+                "mode": pos["mode"],
+                "mode_label": hs.MODE_CONFIGS.get(pos["mode"], {}).get("label", pos["mode"]),
+                "real": pos.get("real", False),
+                "expiry": expiry,
+                "lots": lots,
+                "legs": pos["legs"],
+                "entry_date": (pos.get("opened_at") or "")[:10],
+                "premium_pts": prem,
+                "premium_hkd": round(prem * HK_PER_PT * lots, 0),
+                "hsi_at_open": pos.get("hsi_at_open"),
+                "hsi_now": round(hsi_now, 2) if hsi_now is not None else None,
+                "days_left": days_left,
+                "live_pnl_hkd": pnl_hkd,
+                "pnl_pct": round(pnl_pts / prem * 100, 1) if (pnl_pts is not None and prem > 0) else None,
+                "suggest": suggest["key"],
+                "suggest_reason": suggest["reason"],
+            })
+    finally:
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return {"positions": out, "hsi_now": round(hsi_now, 2) if hsi_now is not None else None}
+
+
+# ---------------------------------------------------------------------------
+# 前向 paper 記錄（每日一次，resolve DTE 日後）
+# ---------------------------------------------------------------------------
+def track_today(sig):
+    t = load_track()
+    today = hs.now_hkt().strftime("%Y-%m-%d")
+    preds = t.setdefault("predictions", [])
+    if any(p.get("date") == today for p in preds):
+        return
+    if sig["mode"] == "SKIP" or not sig["strikes"].get("L"):
+        return
+    ctr = sig.get("contracts") or {}
+    prem = round((ctr.get("call") or {}).get("bid", 0) + (ctr.get("put") or {}).get("bid", 0), 1)
+    preds.append({
+        "date": today, "mode": sig["mode"], "mode_label": sig.get("mode_label", sig["mode"]),
+        "vhsi": sig["vhsi"], "hsi": sig["hsi"],
+        "K": sig["strikes"].get("K"), "L": sig["strikes"].get("L"),
+        "premium_pts": prem, "bs_winprob": sig.get("bs_winprob"), "dte": sig.get("dte", 5),
+    })
+    save_track(t)
+
+
+def resolve_track(hsi_now):
+    t = load_track()
+    resolved = t.setdefault("resolved", [])
+    preds = t.get("predictions", [])
+    keep = []
+    for p in preds:
+        entry = datetime.strptime(p["date"], "%Y-%m-%d")
+        age = (hs.now_hkt().replace(tzinfo=None) - entry).days
+        if age < p.get("dte", 5):
+            keep.append(p)
+            continue
+        if p["mode"] in ("Full", "HighVol"):
+            win = (p["L"] < hsi_now < p["K"])
+            intrinsic = max(0.0, hsi_now - p["K"]) + max(0.0, p["L"] - hsi_now)
+        else:
+            win = (hsi_now > p["L"])
+            intrinsic = max(0.0, p["L"] - hsi_now)
+        pnl = round((p.get("premium_pts", 0) - intrinsic) * 50, 0)
+        resolved.append({**p, "resolved_hsi": round(hsi_now, 2), "win": bool(win), "pnl": pnl})
+    t["predictions"] = keep
+    save_track(t)
+
+
+def track_view():
+    t = load_track()
+    res = t.get("resolved", [])
+    wins = sum(1 for r in res if r.get("win"))
+    bt = _load(BACKTEST_PATH, {})
+    d5 = bt.get("results", {}).get("dte5", {}).get("gated", {})
+    return {
+        "backtest": {"win_rate_pct": d5.get("win_rate_pct"), "avg_pnl_hkd": d5.get("avg_pnl_hkd"),
+                     "entered": d5.get("entered"), "by_mode": d5.get("by_mode", {})},
+        "forward": {"n": len(res), "wins": wins,
+                    "win_rate_pct": round(wins / len(res) * 100, 1) if res else None,
+                    "pending": len(t.get("predictions", []))},
+        "resolved": res[-30:],
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+def _json(h, obj, code=200):
+    body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+    h.send_response(code)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Access-Control-Allow-Origin", "*")
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            return json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return {}
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        try:
+            p = urlparse(self.path).path
+            if p == "/health":
+                return _json(self, {"ok": True, "time": _now_iso()})
+            if p == "/signal":
+                sig = compute_signal()
+                track_today(sig)
+                resolve_track(sig["hsi"])
+                return _json(self, sig)
+            if p == "/positions":
+                return _json(self, positions_view())
+            if p == "/track":
+                return _json(self, track_view())
+            if p == "/config":
+                return _json(self, load_state().get("config", {}))
+            return _json(self, {"error": "not found"}, 404)
+        except Exception as e:
+            traceback.print_exc()
+            return _json(self, {"error": str(e)}, 500)
+
+    def do_POST(self):
+        try:
+            p = urlparse(self.path).path
+            body = self._body()
+            if p == "/config":
+                st = load_state()
+                st.setdefault("config", {}).update({k: body[k] for k in ("auto_mode", "enabled", "lots") if k in body})
+                save_state(st)
+                return _json(self, {"ok": True, "config": st["config"]})
+            if p == "/order":
+                sig = compute_signal()
+                if sig["mode"] == "SKIP":
+                    return _json(self, {"success": False, "error": "今日 VHSI 分級 SKIP，唔應該入場"}, 400)
+                real = bool(body.get("real"))
+                if real and not body.get("confirm"):
+                    return _json(self, {"success": False, "need_confirm": True,
+                                        "error": "真盤要 confirm=true 先會落單"}, 400)
+                lots = int(body.get("lots") or load_state()["config"].get("lots", 1))
+                res = open_position(sig, lots, real)
+                if res.get("success"):
+                    st = load_state()
+                    st.setdefault("positions", []).append(res["position"])
+                    save_state(st)
+                return _json(self, res, 200 if res.get("success") else 400)
+            if p == "/close":
+                pid = body.get("position_id")
+                st = load_state()
+                pos = next((x for x in st.get("positions", []) if x.get("id") == pid), None)
+                if not pos:
+                    return _json(self, {"success": False, "error": "搵唔到持倉"}, 404)
+                real = bool(pos.get("real"))
+                if real and not body.get("confirm"):
+                    return _json(self, {"success": False, "need_confirm": True, "error": "真盤平倉要 confirm=true"}, 400)
+                if real:
+                    for leg in pos["legs"]:
+                        r = place_real_order(leg["code"], pos.get("lots", 1), "BUY", 0)
+                        if not r["success"]:
+                            return _json(self, {"success": False, "error": f"平倉失敗 {leg['code']}: {r['error']}"}, 400)
+                        time.sleep(2.2)
+                pos["status"] = "CLOSED"
+                pos["closed_at"] = _now_iso()
+                save_state(st)
+                return _json(self, {"success": True, "position": pos})
+            return _json(self, {"error": "not found"}, 404)
+        except Exception as e:
+            traceback.print_exc()
+            return _json(self, {"error": str(e)}, 500)
+
+
+def main():
+    srv = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    print(f"[hsi-strangle] listening :{LISTEN_PORT}", flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
