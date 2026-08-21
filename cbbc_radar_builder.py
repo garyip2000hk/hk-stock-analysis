@@ -35,8 +35,22 @@ CBBC_DB = Path("/home/workspace/Desktop/db/CBBC")
 HSI = "HK.800000"
 VHSI = "HK.800125"
 NIGHT_FUT = "HK.HSImain"
-# 美股上市嘅恒指相關 ADR 代理籃（OpenD 可攞，用嚟估「先」方向；等權平均，唔係官方港股 ADR 指數）
-ADR_BASKET = ["US.BABA", "US.JD", "US.BIDU", "US.NTES", "US.PDD", "US.XPEV", "US.NIO", "US.LI", "US.TCOM", "US.BILI", "US.BEKE", "US.ZTO"]
+# 恒指成分嘅美股 ADR 代理籃（按恒指約數權重 % 加權，權重季度檢視；OpenD 攞日 K 收市）。
+# ⚠️ 唔可以用等權中概籃（2026-08-21 教訓：網易 -5.9%/B站 -3.8% 等細權重股拖到等權 -1.02% →
+# 假訊號 -262 點；同一晚加權只係 +4.8 點）。非恒指成分（PDD/NIO/BEKE）唔入籃。
+# 騰訊/美團/小米/友邦等冇美股上市 ADR，覆蓋約 20% 恒指權重，數值只係方向代理。
+ADR_BASKET = {
+    "US.BABA": 8.0,   # 阿里 09991（恒指 8% 上限）
+    "US.HSBC": 7.5,   # 匯控 00005
+    "US.NTES": 1.5,   # 網易 09999
+    "US.JD": 1.0,     # 京東 09618
+    "US.BIDU": 0.8,   # 百度 09888
+    "US.LI": 0.4,     # 理想 02015
+    "US.BILI": 0.3,   # B站 09626
+    "US.XPEV": 0.2,   # 小鵬 09868
+    "US.ZTO": 0.2,    # 中通 02057
+    "US.TCOM": 0.2,   # 攜程 09961
+}
 ZONE_SIZE = 200
 KEEP_DAYS = 5
 MAX_WAIT_SECONDS = 120
@@ -120,6 +134,56 @@ def cbbc_codes_local():
     return codes, f.name
 
 
+def _adr_proxy_change(ctx, prediction_date, close):
+    """恒指 ADR 代理：恒指成分美股 ADR 按恒指權重加權嘅隔夜變化 × HSI close。
+    用日 K 收市計（美股快照 update_time 個 field 係壞嘅，唔可靠）；日 K 攞唔到先後備快照。
+    覆蓋權重 < 15% 就當無數據。"""
+    from datetime import date as _date, timedelta as _td
+    end_d = _date.fromisoformat(prediction_date)
+    rets = {}
+    missing = []
+    for code in ADR_BASKET:
+        r = None
+        try:
+            ret, df, _ = ctx.request_history_kline(
+                code, start=str(end_d - _td(days=10)), end=prediction_date,
+                ktype="K_DAY", max_count=10,
+            )
+            if ret == 0 and df is not None and len(df) >= 2:
+                df = df.tail(2).reset_index(drop=True)
+                d_last = str(df.iloc[-1]["time_key"])[:10]
+                # 最後一根一定要係「尋晚嗰節」美股交易日（prediction_date 減 1～4 日）
+                if (end_d - _td(days=4)).isoformat() <= d_last < prediction_date:
+                    r = float(df.iloc[-1]["close"]) / float(df.iloc[-2]["close"]) - 1.0
+        except Exception:
+            r = None
+        if r is None:
+            missing.append(code)
+        else:
+            rets[code] = r
+    if missing:
+        try:
+            ret2, sn = ctx.get_market_snapshot(missing)
+            if ret2 == 0 and len(sn):
+                for _, row in sn.iterrows():
+                    lp, pc = float(row["last_price"]), float(row["prev_close_price"])
+                    if lp > 0 and pc > 0:
+                        rets[row["code"]] = lp / pc - 1.0
+        except Exception:
+            pass
+    num = sum(ADR_BASKET[c] * r for c, r in rets.items())
+    den = sum(ADR_BASKET[c] for c in rets)
+    if den < 15.0:
+        log(f"ADR 代理覆蓋不足（權重 {den:.1f}% < 15%）→ 當無數據")
+        return None
+    detail = " ".join(
+        f"{c.split('.')[-1]}{r*100:+.2f}%" for c, r in sorted(rets.items(), key=lambda kv: -ADR_BASKET[kv[0]])
+    )
+    chg = close * (num / den)
+    log(f"ADR 代理: 加權 {num/den*100:+.3f}% → {chg:+.1f} 點（{detail}）")
+    return round(chg, 1)
+
+
 def previous_night_premarket(ctx, trading_date, prediction_date, close):
     """前一晚嘅「先」方向：夜期（HK.HSImain 夜市收 vs 日市收）+ ADR 代理籃（OpenD 美股）。
     trading_date=結算數據日、prediction_date=訊號適用日。夜期 = 結算日晚 17:00 → 適用日凌晨 03:05。"""
@@ -133,21 +197,26 @@ def previous_night_premarket(ctx, trading_date, prediction_date, close):
             row = ns.iloc[0]
             last = float(row["last_price"])
             prev_c = float(row["prev_close_price"])
-            upd = str(row["update_time"])  # 夜期收應該係 prediction_date 凌晨 ~03:00
-            upd_d, upd_t = upd[:10], upd[11:16]
-            if last > 0 and prev_c > 0 and upd_d == prediction_date and upd_t <= "05:00":
+            upd = str(row["update_time"])  # 夜期最後成交時間
+            # 合法時間窗：結算日 17:00 → 翌日 03:05（週五晚嗰節收喺週六 03:00，
+            # 所以基準係 trading_date 唔係 prediction_date；開市後 live 價會被呢個窗擋走）
+            try:
+                upd_dt = datetime.strptime(upd[:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                upd_dt = None
+            win_lo = datetime.strptime(f"{trading_date} 17:00", "%Y-%m-%d %H:%M")
+            win_hi = win_lo + timedelta(hours=10, minutes=5)
+            if last > 0 and prev_c > 0 and upd_dt is not None and win_lo <= upd_dt <= win_hi:
                 night_change = round(last - prev_c, 1)
                 log(f"夜期原始值: 日市收={prev_c:.0f} / 夜期收({upd})={last:.0f} → 變化 {night_change:+.1f}")
             else:
-                log(f"夜期快照時間唔啱（update_time={upd}，預期 {prediction_date} 凌晨）或價為 0，當無訊號處理")
+                log(f"夜期快照時間唔啱（update_time={upd}，預期 {trading_date} 17:00–翌日 03:05）或價為 0，當無訊號處理")
 
         adr_change = None
-        r2, us = ctx.get_market_snapshot(ADR_BASKET)
-        if r2 == 0 and len(us):
-            us = us[(us["last_price"] > 0) & (us["prev_close_price"] > 0)]
-            if len(us) >= 3:
-                pct = ((us["last_price"] / us["prev_close_price"]) - 1).mean()
-                adr_change = round(close * float(pct), 1)
+        try:
+            adr_change = _adr_proxy_change(ctx, prediction_date, close)
+        except Exception as e:
+            log(f"⚠️ ADR 代理計唔到: {e}")
 
         # 方向判定（用戶規則 2026-08-21）：夜期同 ADR 各自要 |升跌| > 100 點先算有方向，
         # 唔夠 100 點當無訊號 → 先窄幅波動；兩邊同向 >100 = 確認；相反 → 取幅度大嗰邊（唔確認）。
@@ -196,17 +265,21 @@ def build_day(ctx, trading_date, prediction_date=None):
     hsi = idx[idx["code"] == HSI].iloc[0]
     vhsi_row = idx[idx["code"] == VHSI].iloc[0]
     close = None
+    k_open = k_high = k_low = None
     try:
         r_k, kdf, _ = ctx.request_history_kline(HSI, start=trading_date, end=trading_date, ktype="K_DAY", max_count=2)
         if r_k == 0 and len(kdf):
-            close = float(kdf.iloc[-1]["close"])
+            krow = kdf.iloc[-1]
+            close = float(krow["close"])
+            k_open, k_high, k_low = float(krow["open"]), float(krow["high"]), float(krow["low"])
     except Exception as e:
         log(f"⚠️ HSI 日 K 攞唔到（{e}），用 snapshot prev_close 後備")
     if close is None or close <= 0:
         close = float(hsi["prev_close_price"])
-    open_p = float(hsi["open_price"])
-    high = float(hsi["high_price"])
-    low = float(hsi["low_price"])
+    # open/high/low 一樣優先用日 K：開市前快照可能未更新，開市後會歸零（09:16 重跑實測全變 0）
+    open_p = k_open if k_open and k_open > 0 else float(hsi["open_price"])
+    high = k_high if k_high and k_high > 0 else float(hsi["high_price"])
+    low = k_low if k_low and k_low > 0 else float(hsi["low_price"])
     vhsi = float(vhsi_row["prev_close_price"]) / 100.0  # 存小數（與舊格式一致）
     em1d = close * vhsi / (252 ** 0.5)
     upper_day = round(close + em1d)
@@ -338,7 +411,7 @@ def build_dataset(record):
     ds = {
         "generatedAt": now,
         "refreshedAt": now,
-        "sourceNote": "每個交易日 08:10（HKT）用昨日結算牛熊數據判當日；「先」向按前晚夜期及 ADR（OpenD）。",
+        "sourceNote": "每個交易日 08:00（HKT）用昨日結算牛熊數據判當日；「先」向按前晚夜期及恒指權重加權 ADR 代理（OpenD）；08:45 重算 premarket 再推一次。",
         "availableDates": [d["date"] for d in days if days],
         "days": days,
     }
@@ -384,9 +457,50 @@ def push_only():
     return 0 if push(ds) else 1
 
 
+def _pm_quality(pm):
+    if not pm:
+        return -1
+    return (1 if pm.get("nightFuturesChange") is not None else 0) + (1 if pm.get("adrChange") is not None else 0)
+
+
+def refresh_premarket():
+    """08:45 用：夜期/ADR 數據朝早可能延遲入庫（futu 美股日 K、期貨快照都有呢個風險），
+    重計一次 premarket，覆蓋變好先更新 dataset 同 verdict 再推；否則照舊重推。"""
+    from futu import OpenQuoteContext
+    if not DATASET_PATH.exists():
+        log(f"REFRESH_FAIL: 搵唔到 {DATASET_PATH}")
+        return 1
+    ds = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
+    day0 = ds["days"][0]
+    pred = day0.get("predictionDate") or day0["date"]
+    ctx = OpenQuoteContext(host="127.0.0.1", port=11111)
+    try:
+        pm = previous_night_premarket(ctx, day0["date"], pred, day0["close"])
+    finally:
+        ctx.close()
+    if pm and _pm_quality(pm) > _pm_quality(day0.get("premarket")):
+        day0["premarket"] = pm
+        ws = day0.get("weightedScore", 0)
+        back = "上屠熊" if ws >= 0.25 else ("下殺牛" if ws <= -0.25 else "窄幅波動")
+        d0 = pm.get("initialDirection")
+        day0["verdict"] = (
+            f"先{'升' if d0 == 'up' else '跌'}後{back}" if d0
+            else ("窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}")
+        )
+        (DAYS_DIR / f"{day0['date']}.json").write_text(json.dumps(day0, ensure_ascii=False))
+        ds["refreshedAt"] = datetime.now(HKT).isoformat(timespec="seconds")
+        DATASET_PATH.write_text(json.dumps(ds, ensure_ascii=False))
+        log(f"REFRESH_UPDATED: verdict={day0['verdict']} 夜期={pm.get('nightFuturesChange')} ADR={pm.get('adrChange')}")
+    else:
+        log("REFRESH_SAME: premarket 無變好，照舊重推")
+    return 0 if push(ds) else 1
+
+
 def main():
     if "--push-only" in sys.argv:
         return push_only()
+    if "--refresh-premarket" in sys.argv:
+        return refresh_premarket()
     from futu import OpenQuoteContext
     now_hkt = datetime.now(HKT)
     today = now_hkt.strftime("%Y-%m-%d")

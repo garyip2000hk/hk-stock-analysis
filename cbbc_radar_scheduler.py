@@ -28,7 +28,8 @@ RETRY_EVERY_MIN = 30
 LAST_RETRY = (9, 10)
 TIMEOUT_SEC = 15 * 60
 # Manus 每日 08:40 會用舊 pipeline 嘅數據覆蓋我哋 08:00 推上 gsmart-box 嘅版本，
-# 所以 08:45 要原檔重推一次（唔重建），確保用戶見到嘅係 Zo 版（新日期語義 + 開市前預判）。
+# 所以 08:45 要重推一次（唔重建主體，但會重算 premarket —— 夜期/ADR 朝早可能延遲入庫），
+# 確保用戶見到嘅係 Zo 版（新日期語義 + 開市前預判 + 齊全嘅「先」向數據）。
 REPUSH_AT = (8, 45)
 
 
@@ -50,8 +51,8 @@ def save_state(state):
 def run_repush():
     try:
         proc = subprocess.run(
-            [PY, str(BUILDER), "--push-only"],
-            capture_output=True, text=True, timeout=120,
+            [PY, str(BUILDER), "--refresh-premarket"],
+            capture_output=True, text=True, timeout=180,
         )
     except subprocess.TimeoutExpired:
         log("✗ 重推超時")
