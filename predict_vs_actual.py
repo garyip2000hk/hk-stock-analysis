@@ -7,7 +7,7 @@ predict_vs_actual.py — 恆指「預測 vs 真實」數據引擎
   2. Google Sheet「工作表2」— CBBC 街貨分佈每日記錄（用戶每日貼入）
   3. Google Sheet「工作表4」— 最新 OHLC / VHSI / EM 階梯
   4. Google Sheet「HSI_Data」— GOOGLEFINANCE 收市 backup
-  5. Google Sheet「strangle_log」— 每週 Short Strangle 記錄
+  5. Google Sheet「live_forward_log」— 牛熊雷達前瞻記錄（HSI Short Strangle dashboard）
 
 EM 公式同工作表4完全一致：EM_N = close × VHSI/100 ÷ divisor
   divisor: 1日=√252, 2日=√126, 1週=√52, 1月=√12, 6週=√6, 3月=√4, 半年=√2, 1年=√1
@@ -33,7 +33,7 @@ HORIZONS = [("1", "1日", math.sqrt(252)), ("2", "2日", math.sqrt(126)),
             ("42", "6週", math.sqrt(6)), ("63", "3月", math.sqrt(4)),
             ("126", "半年", math.sqrt(2)), ("252", "1年", 1.0)]
 
-MIN_OS = 300  # 街貨門檻，同 strangle records 一致
+MIN_OS = 300  # 街貨門檻
 
 
 def fetch_text(url):
@@ -161,58 +161,41 @@ def load_cbbc():
     return out
 
 
-def load_strangle_log():
-    rows_out = []
+def load_radar_log():
+    """live_forward_log — 牛熊雷達每日前瞻記錄（方向預測＋目標區＋t1-t3 驗證）"""
+    out = []
     try:
-        rows = fetch_csv("strangle_log")
+        rows = fetch_csv("live_forward_log")
     except Exception as e:
-        print(f"WARN strangle_log: {e}", file=sys.stderr)
-        return rows_out
-    hdr = rows[0] if rows else []
+        print(f"WARN radar_log: {e}", file=sys.stderr)
+        return out
+    if not rows:
+        return out
+    idx = {name.strip(): i for i, name in enumerate(rows[0])}
+
+    def g(r, name):
+        i = idx.get(name)
+        return r[i].strip() if i is not None and i < len(r) else ""
+
     for r in rows[1:]:
-        if not any(x.strip() for x in r if x):
+        d = norm_date(g(r, "record_date"))
+        verdict = g(r, "verdict")
+        if not d or not verdict:
             continue
-        rows_out.append({
-            "week": r[0] if len(r) > 0 else "",
-            "entry": norm_date(r[1]) if len(r) > 1 else None,
-            "expiry": norm_date(r[2]) if len(r) > 2 else None,
-            "vhsi": num(r[3]) if len(r) > 3 else None,
-            "hsi": num(r[4]) if len(r) > 4 else None,
-            "mode": r[5].strip() if len(r) > 5 and r[5].strip() else "",
-            "adjK": num(r[8]) if len(r) > 8 else None,
-            "adjL": num(r[9]) if len(r) > 9 else None,
-            "expiry_hsi": num(r[12]) if len(r) > 12 else None,
-            "result": r[13].strip() if len(r) > 13 else "",
+        if "掃熊" in verdict or "向上" in verdict:
+            dir_ = "up"
+        elif "掃牛" in verdict or "向下" in verdict:
+            dir_ = "down"
+        else:
+            dir_ = "range"
+        out.append({
+            "d": d, "verdict": verdict, "dir": dir_,
+            "tl": num(g(r, "target_low")), "th": num(g(r, "target_high")),
+            "ref": num(g(r, "reference_rate")),
+            "status": g(r, "premarket_status"),
+            "outcome": g(r, "final_outcome"),
         })
-    return rows_out
-
-
-def backfill_strangle(strangle, kline_hsi):
-    last_k = max(kline_hsi) if kline_hsi else None
-    for w in strangle:
-        if not w["mode"] or w["mode"] == "SKIP":
-            continue
-        e, x = w["entry"], w["expiry"]
-        if not e or not x or not last_k:
-            continue
-        days = [k for k in sorted(kline_hsi) if e <= k <= x]
-        if not days:
-            continue
-        wk_hi = max(kline_hsi[k][1] for k in days)
-        wk_lo = min(kline_hsi[k][2] for k in days)
-        w["wk_hi"], w["wk_lo"] = wk_hi, wk_lo
-        if w["expiry_hsi"] is None:
-            w["expiry_hsi"] = kline_hsi[days[-1]][3]
-        if w["result"]:
-            continue
-        if x > last_k:
-            w["result"] = "OPEN"
-            continue
-        K, L = w["adjK"], w["adjL"]
-        if w["mode"] == "Full" and K and L:
-            w["result"] = "WIN" if (wk_hi < K and wk_lo > L) else "LOSS"
-        elif w["mode"] == "PutOnly" and L:
-            w["result"] = "WIN" if wk_lo > L else "LOSS"
+    return out
 
 
 def main():
@@ -224,8 +207,7 @@ def main():
     s4 = load_sheet4()
     hsi_close = load_hsi_close()
     cbbc = load_cbbc()
-    strangle = load_strangle_log()
-    backfill_strangle(strangle, kline_hsi)
+    radar = load_radar_log()
 
     # ── 合併每日序列 ──
     dates = sorted(set(kline_hsi) | set(s4) | set(cbbc) | set(hsi_close))
@@ -293,25 +275,15 @@ def main():
         row["fwd"] = fwd
 
     # ── 統計 ──
-    cov_stats = {}
-    for key, label, _ in HORIZONS:
-        N = int(key)
-        tot = cov = upb = dnb = 0
-        for i, row in enumerate(series):
-            f = row["fwd"].get(key)
-            em = row["em"].get(key)
-            if not f or not f.get("full") or not em or row["h"] is None:
-                continue
-            tot += 1
-            if f["hi"] > em[0]:
-                upb += 1
-            if f["lo"] < em[1]:
-                dnb += 1
-            if f["hi"] <= em[0] and f["lo"] >= em[1]:
-                cov += 1
-        cov_stats[key] = {"label": label, "n": tot, "covered": cov,
-                          "pct": round(100 * cov / tot, 1) if tot else None,
-                          "up_break": upb, "dn_break": dnb}
+    rd_dir = [r for r in radar if r["dir"] != "range"]
+    rd_hit = sum(1 for r in rd_dir if r["outcome"] == "HIT")
+    rd_miss = sum(1 for r in rd_dir if r["outcome"] == "MISS")
+    radar_stats = {
+        "n": len(radar), "dir": len(rd_dir), "hit": rd_hit, "miss": rd_miss,
+        "pending": len(rd_dir) - rd_hit - rd_miss,
+        "range": len(radar) - len(rd_dir),
+        "pct": round(100 * rd_hit / (rd_hit + rd_miss), 1) if rd_hit + rd_miss else None,
+    }
 
     cl_stats = {}
     for H in (5, 21):
@@ -361,8 +333,8 @@ def main():
         "series": series,
         "heat": heat,
         "max_os": max_os,
-        "stats": {"coverage": cov_stats, "cluster": cl_stats},
-        "strangle": strangle,
+        "stats": {"radar": radar_stats, "cluster": cl_stats},
+        "radar": radar,
     }
 
     js = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
