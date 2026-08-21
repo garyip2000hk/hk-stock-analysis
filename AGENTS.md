@@ -293,7 +293,7 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 `weightedContribution = covered × distanceWeight`；
 scores=(bear−bull)/sum；verdict 用 weightedScore ±0.25 定型（唔再靠 AI）。
 zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（street_vol/1e6）。
-夜跑（21:30 HKT）`premarket` 留空；要盤前資料要另加朝 08:40 跑 + ADR scrape。
+`premarket`「先」向判定規則（2026-08-21 用戶定）：夜期（HSImain 夜市收 vs 日市收）同 ADR 代理籃**各自**睇——任何一邊 |升跌| > 100 點先有方向訊號（偏向該邊方向），兩邊都唔夠 100 點 = 「先窄幅波動」（initialDirection=null）；兩邊都 >100 同向 = isConfirmed；兩邊 >100 但相反 = 取幅度較大一方、唔確認。`adjustment` 跟訊號邊（唔夠 100 點嗰邊唔用）。舊邏輯「夜期 -2 點都當同向確認」係錯，已廢。
 
 `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每日 21:30 HKT 跑，
 失敗 22:00/22:30 重試。entrypoint 用 `bash -c 'source /root/.zo_secrets; ...'`

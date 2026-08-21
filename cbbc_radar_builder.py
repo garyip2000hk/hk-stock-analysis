@@ -149,14 +149,28 @@ def previous_night_premarket(ctx, trading_date, close):
                 pct = ((us["last_price"] / us["prev_close_price"]) - 1).mean()
                 adr_change = round(close * float(pct), 1)
 
-        adjustment = night_change if night_change is not None else adr_change
-        if adjustment is None:
-            return None
-        direction = "up" if adjustment > 0 else ("down" if adjustment < 0 else None)
-        confirmed = (
-            night_change is not None and adr_change is not None
-            and (night_change > 0) == (adr_change > 0)
-        )
+        # 方向判定（用戶規則 2026-08-21）：夜期同 ADR 各自要 |升跌| > 100 點先算有方向，
+        # 唔夠 100 點當無訊號 → 先窄幅波動；兩邊同向 >100 = 確認；相反 → 取幅度大嗰邊（唔確認）。
+        sigs = []
+        if night_change is not None and abs(night_change) > 100:
+            sigs.append((night_change, "夜期"))
+        if adr_change is not None and abs(adr_change) > 100:
+            sigs.append((adr_change, "ADR"))
+        if not sigs:
+            direction, confirmed, adjustment = None, False, 0.0
+        else:
+            dirs = {("up" if c > 0 else "down") for c, _ in sigs}
+            if len(dirs) == 1:
+                direction = dirs.pop()
+                confirmed = len(sigs) == 2
+                # adjustment 跟「過 100 點嘅訊號邊」；兩邊同向就優先夜期（直接關聯 HSI）
+                if len(sigs) == 2 and night_change is not None and abs(night_change) > 100:
+                    adjustment = night_change
+                else:
+                    adjustment = sigs[0][0]
+            else:
+                win = max(sigs, key=lambda s: abs(s[0]))
+                direction, confirmed, adjustment = ("up" if win[0] > 0 else "down"), False, win[0]
         src = "夜期+ADR（OpenD）" if adr_change is not None else "夜期（OpenD）"
         return {
             "adrChange": None if adr_change is None else round(adr_change, 1),
@@ -166,7 +180,7 @@ def previous_night_premarket(ctx, trading_date, close):
             "isConfirmed": bool(confirmed),
             "adjustedReference": round(close + adjustment, 2),
             "sourceLabel": src + ("，同向確認" if confirmed else ""),
-            "status": f"先{'升' if adjustment > 0 else ('跌' if adjustment < 0 else '平')}，等待目標",
+            "status": (f"先{'升' if direction == 'up' else '跌'}，等待目標" if direction else "先窄幅波動"),
         }
     except Exception as e:
         log(f"⚠️ 前一晚 premarket 失敗（唔影響主體）: {e}")
@@ -253,8 +267,12 @@ def build_day(ctx, trading_date, prediction_date=None):
         back = "下殺牛"
     else:
         back = "窄幅波動"
-    if premarket and premarket.get("initialDirection"):
-        verdict = f"先{'升' if premarket['initialDirection'] == 'up' else '跌'}後{back}"
+    if premarket:
+        d0 = premarket.get("initialDirection")
+        if d0:
+            verdict = f"先{'升' if d0 == 'up' else '跌'}後{back}"
+        else:
+            verdict = "窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}"
     else:
         verdict = back
 
