@@ -302,7 +302,7 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
 ### 牛熊波幅雷達（gsmart-box，OpenD 重建版，08-18）
 
 - `cbbc_radar_builder.py` — 每日生成 dataset JSON：`HK.800000`(恒指) + `HK.800125`(VHSI) 快照 + 本地 CBBC scrape 名單逐隻 batch snapshot 攞 `wrt_recovery_price` / `wrt_street_vol`；200 點 zone 聚合；EM=close×VHSI/√252；verdict 用 weightedScore ±0.25；歷史日 append 存 `cbbc_radar/days/<date>.json`
-- `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每晚 21:30 HKT 交易日跑（失敗 22:00/22:30 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`
+- `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑（失敗 08:40/09:10 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`；**08:45 原檔重推一次**（`--push-only`）—— Manus 舊 pipeline 仍每日 08:40 推舊格式數據覆蓋，重推保證我哋係最終版本；根治要喺 Manus 停咗佢個每日推送任務
 - **密鑰喺 `stock-analysis/.cbbc_radar_secrets`**（chmod 600，已 gitignore）——平台 Secrets 同步有延遲/唔可靠，排程器 entrypoint 係 source `/root/.zo_secrets` 再 source 呢個檔
 - **⚠️ Manus edge WAF 會 403 擋 Python-urllib 預設 UA**（唔係密鑰錯！密鑰錯係 401）——push 一定要帶 browser UA header
 - 盤前 ADR（premarket 段）舊版靠朝 08:40 Manus 跑 scrape；Zo 版暫時留空，要嘅話另加朝早 08:40 排程 + ADR 來源
