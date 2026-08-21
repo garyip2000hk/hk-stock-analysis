@@ -305,7 +305,8 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
 - `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑（失敗 08:40/09:10 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`；**08:45 原檔重推一次**（`--push-only`）—— Manus 舊 pipeline 仍每日 08:40 推舊格式數據覆蓋，重推保證我哋係最終版本；根治要喺 Manus 停咗佢個每日推送任務
 - **密鑰喺 `stock-analysis/.cbbc_radar_secrets`**（chmod 600，已 gitignore）——平台 Secrets 同步有延遲/唔可靠，排程器 entrypoint 係 source `/root/.zo_secrets` 再 source 呢個檔
 - **⚠️ Manus edge WAF 會 403 擋 Python-urllib 預設 UA**（唔係密鑰錯！密鑰錯係 401）——push 一定要帶 browser UA header
-- 盤前 ADR（premarket 段）舊版靠朝 08:40 Manus 跑 scrape；Zo 版暫時留空，要嘅話另加朝早 08:40 排程 + ADR 來源
+- 盤前 premarket（夜期+ADR，2026-08-21 定案）：**夜期用 HSImain 快照**（朝早 08:00 跑時 `last_price`=尋晚 T+1 段收、`prev_close`=昨日日市收，驗 `update_time` 係適用日凌晨 ≤05:00 先用）——⚠️ 唔好用 futu 期貨歷史 K線，T+1 夜期段延遲入庫，朝早跑根本未有尋晚 bars（曾因此攞錯舊夜期 → 假 −256.9）。ADR 用 13 隻 OpenD 美股快照 pct 均值 × HSI close。方向規則：任何一邊 |升跌| >100 點先算訊號，兩邊都唔夠 = 先窄幅波動
+- ⚠️ **close 用 HSI 歷史日 K 攞 trade_dt 收市，唔用快照 `prev_close_price`**（朝早 08:00 快照 prev_close 可能仲係前日，08-21 實測攞到 25,495 而真實 08-20 收係 25,698，相差 200 點）；快照 prev_close 只做後備。open/high/low 仍用快照（朝早跑時係昨日全日數值）
 
 ## 期權策略真回測 vs 舊代理／舊鐵鷹回測（2026-08-17 對帳）
 

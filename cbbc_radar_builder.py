@@ -120,26 +120,26 @@ def cbbc_codes_local():
     return codes, f.name
 
 
-def previous_night_premarket(ctx, trading_date, close):
-    """前一晚嘅「先」方向：夜期（HK.HSImain 夜市收 vs 日市收）+ ADR 代理籃（OpenD 美股）。"""
+def previous_night_premarket(ctx, trading_date, prediction_date, close):
+    """前一晚嘅「先」方向：夜期（HK.HSImain 夜市收 vs 日市收）+ ADR 代理籃（OpenD 美股）。
+    trading_date=結算數據日、prediction_date=訊號適用日。夜期 = 結算日晚 17:00 → 適用日凌晨 03:05。"""
     from datetime import date as _date
     try:
-        y, m, d = map(int, trading_date.split("-"))
-        day = _date(y, m, d)
-        prev_day = (day - timedelta(days=7))
-        ret, kdf, _ = ctx.request_history_kline(
-            NIGHT_FUT, start=prev_day.isoformat(), end=trading_date,
-            ktype="K_5M", max_count=1000, session="ALL",
-        )
+        # 夜期：HSImain 快照（朝早跑時 last_price = 尋晚 T+1 段收市、prev_close = 昨日日市收）。
+        # 唔用歷史 K線 —— futu 期貨 K線嘅 T+1 段延遲入庫，朝早跑時根本未有尋晚 bars。
         night_change = None
-        if ret == 0 and len(kdf):
-            kdf = kdf.copy()
-            kdf["d"] = kdf["time_key"].str[:10]
-            kdf["t"] = kdf["time_key"].str[11:16]
-            day_close = kdf[(kdf["d"] < trading_date) & (kdf["t"] <= "16:30")]
-            night_bars = kdf[((kdf["d"] < trading_date) & (kdf["t"] >= "17:00")) | ((kdf["d"] == trading_date) & (kdf["t"] <= "03:05"))]
-            if len(day_close) and len(night_bars):
-                night_change = float(night_bars.iloc[-1]["close"] - day_close.iloc[-1]["close"])
+        r_n, ns = ctx.get_market_snapshot([NIGHT_FUT])
+        if r_n == 0 and len(ns):
+            row = ns.iloc[0]
+            last = float(row["last_price"])
+            prev_c = float(row["prev_close_price"])
+            upd = str(row["update_time"])  # 夜期收應該係 prediction_date 凌晨 ~03:00
+            upd_d, upd_t = upd[:10], upd[11:16]
+            if last > 0 and prev_c > 0 and upd_d == prediction_date and upd_t <= "05:00":
+                night_change = round(last - prev_c, 1)
+                log(f"夜期原始值: 日市收={prev_c:.0f} / 夜期收({upd})={last:.0f} → 變化 {night_change:+.1f}")
+            else:
+                log(f"夜期快照時間唔啱（update_time={upd}，預期 {prediction_date} 凌晨）或價為 0，當無訊號處理")
 
         adr_change = None
         r2, us = ctx.get_market_snapshot(ADR_BASKET)
@@ -190,11 +190,20 @@ def previous_night_premarket(ctx, trading_date, close):
 def build_day(ctx, trading_date, prediction_date=None):
     mmdd = trading_date[5:].replace("-", "-")
     # ── HSI + VHSI 快照 ──
-    # 用 prev_close_price（trading_date 當日嘅正式收市價），唔係 last_price（即市價）
+    # close 用歷史日 K 攞 trading_date 嘅正式收市（2026-08-21 教訓：朝早 08:00 snapshot 嘅
+    # prev_close 可能仲未更新，會落後一日）；snapshot prev_close 只做後備。
     idx = snapshot(ctx, [HSI, VHSI])
     hsi = idx[idx["code"] == HSI].iloc[0]
     vhsi_row = idx[idx["code"] == VHSI].iloc[0]
-    close = float(hsi["prev_close_price"])
+    close = None
+    try:
+        r_k, kdf, _ = ctx.request_history_kline(HSI, start=trading_date, end=trading_date, ktype="K_DAY", max_count=2)
+        if r_k == 0 and len(kdf):
+            close = float(kdf.iloc[-1]["close"])
+    except Exception as e:
+        log(f"⚠️ HSI 日 K 攞唔到（{e}），用 snapshot prev_close 後備")
+    if close is None or close <= 0:
+        close = float(hsi["prev_close_price"])
     open_p = float(hsi["open_price"])
     high = float(hsi["high_price"])
     low = float(hsi["low_price"])
@@ -260,7 +269,7 @@ def build_day(ctx, trading_date, prediction_date=None):
     weighted_score = ((bear_w - bull_w) / total_w) if total_w else 0
 
     # ── 判定：「後」方向用當日 08:00 結算牛熊數據；「先」方向用前一晚夜期+ADR ──
-    premarket = previous_night_premarket(ctx, prediction_date or trading_date, close)
+    premarket = previous_night_premarket(ctx, trading_date, prediction_date or trading_date, close)
     if weighted_score >= 0.25:
         back = "上屠熊"
     elif weighted_score <= -0.25:
