@@ -5,8 +5,9 @@
   GET  /stocks                 → 期權標的名單（代號＋名）
   GET  /analyze?code=00700&dir=up|flat|down
   POST /live_quote             {codes:[...]} → OpenD 即市 bid/ask
-  POST /order                  {code, dir, idx, qty, real, confirm}
-                               → paper 記錄 或 REAL 經 OpenD 落單
+  POST /order_spec             {code, dir, idx, qty}
+                               → 純訂單規格，交由嵌入父頁預覽及確認
+  POST /order                  相容別名，亦只返回訂單規格，不會直接落單
   GET  /orders?limit=20        → 最近落單記錄
 
 結果 cache 1 小時（HKEX 日報每日更新一次，唔使重算）。
@@ -167,18 +168,23 @@ def _order_log_read(limit: int = 20) -> list[dict]:
 
 
 def do_order(body: dict) -> dict:
-    """idx: 0=best，1..n=alternatives（同 /analyze 返回排序一致）。"""
-    from futu import OrderType, RET_OK, TrdEnv, TrdSide
+    """建立訂單規格，不直接發出任何 paper 或 REAL 交易。
 
+    真盤控制 token 只留在 gsmart-box 父頁。iframe 前端取得本回應後，必須以
+    ``advisor_place_order`` postMessage 交回父頁，再由父頁 modal 顯示報價預覽及
+    要求使用者逐筆確認。
+    """
     market = str(body.get("market") or "hk_stock").strip().lower()
     if market not in ("hk_stock", "hk_index", "us_stock"):
         return {"ok": False, "error": "market 必須係 hk_stock / hk_index / us_stock"}
     code = str(body.get("code") or "").strip()
     instrument = str(body.get("instrument") or "").strip().upper() or None
-    d = str(body.get("dir") or "").strip().lower()
-    idx = int(body.get("idx", 0))
-    qty = int(body.get("qty", 1) or 1)
-    real = bool(body.get("real"))
+    direction = str(body.get("dir") or "").strip().lower()
+    try:
+        idx = int(body.get("idx", 0))
+        qty = int(body.get("qty", 1) or 1)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "策略編號及張數必須係整數"}
     if market == "hk_stock":
         code = code.zfill(5)
         if not code.isdigit() or len(code) != 5:
@@ -192,90 +198,56 @@ def do_order(body: dict) -> dict:
         code = code.upper()
         if not code or len(code) > 8 or not code.isalnum():
             return {"ok": False, "error": "美股代號無效"}
-    if d not in ("up", "flat", "down"):
+    if direction not in ("up", "flat", "down"):
         return {"ok": False, "error": "dir 必須係 up / flat / down"}
     if qty <= 0 or qty > 500:
         return {"ok": False, "error": "張數要係 1-500"}
-    if not body.get("confirm"):
-        return {"ok": False, "error": "需要 confirm=true（前端要兩步確認）"}
 
-    res = _analyze(code, d, market, instrument or "HSI")
+    res = _analyze(code, direction, market, instrument or "HSI")
     if not res.get("ok"):
         return res
     options = [res.get("best")] + (res.get("alternatives") or [])
     if idx < 0 or idx >= len(options) or not options[idx]:
         return {"ok": False, "error": f"策略編號 {idx} 超出範圍"}
     strat = options[idx]
-
-    # 即市報價定限價：買腿用 ask、賣腿用 bid；攞唔到就用分析嘅結算價（帶警告）
-    leg_codes = [l["futu_code"] for l in strat["legs"] if l.get("futu_code")]
-    warnings: list[str] = []
-    try:
-        quotes = live_quotes(leg_codes)
-    except Exception as e:  # noqa: BLE001
-        quotes = {}
-        warnings.append(f"攞唔到即市報價（{e}），改用結算價做限價")
-
     legs = []
-    for l in strat["legs"]:
-        fc = l.get("futu_code")
-        side = "BUY" if l["action"] == "買入" else "SELL"
-        q = quotes.get(fc) or {}
-        if side == "BUY":
-            px = q.get("ask") or q.get("last") or l["price"]
-        else:
-            px = q.get("bid") or q.get("last") or l["price"]
-        if not q:
-            warnings.append(f"{fc} 冇即市報價，用結算價 {l['price']} 做限價")
-        legs.append({"futu_code": fc, "side": side, "cp": l["cp"],
-                     "strike": l["strike"], "qty": qty, "price": round(float(px), 3),
-                     "settlement": l["price"]})
+    for leg in strat.get("legs") or []:
+        futu_code = str(leg.get("futu_code") or "").strip().upper()
+        action = str(leg.get("action") or "").strip()
+        if not futu_code or action not in ("買入", "賣出"):
+            return {"ok": False, "error": "策略腿資料不完整，無法建立訂單規格"}
+        output_leg = {"futu_code": futu_code, "action": action}
+        if leg.get("cp") in ("C", "P"):
+            output_leg["cp"] = leg["cp"]
+        if isinstance(leg.get("strike"), (int, float)):
+            output_leg["strike"] = leg["strike"]
+        if isinstance(leg.get("price"), (int, float)):
+            output_leg["price"] = leg["price"]
+        legs.append(output_leg)
+    if not legs:
+        return {"ok": False, "error": "策略沒有有效交易腿"}
 
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    entry = {"time": now, "stock": code, "name": res.get("name"),
-             "market": market, "instrument": instrument,
-             "direction": d, "strategy": strat["strategy"],
-             "expiry": strat["expiry"], "dte": strat.get("dte"),
-             "qty": qty, "real": real, "legs": legs, "warnings": warnings}
-
-    if not real:
-        entry["mode"] = "paper"
-        entry["result"] = "記錄模式：冇真實落單"
-        entry["pos_id"] = open_position(entry, res.get("contract_size") or 1)
-        _order_log_append(entry)
-        return {"ok": True, **entry}
-
-    ensure_unlocked()
-    acc = real_account()
-    ctx = trade_ctx()
-    results = []
-    for i, leg in enumerate(legs):
-        if i:
-            time.sleep(ORDER_THROTTLE_S)
-        ret, data = ctx.place_order(
-            price=leg["price"], qty=leg["qty"], code=leg["futu_code"],
-            trd_side=TrdSide.SELL if leg["side"] == "SELL" else TrdSide.BUY,
-            order_type=OrderType.NORMAL, trd_env=TrdEnv.REAL,
-            acc_id=acc, remark="option-advisor")
-        if ret != RET_OK:
-            results.append({"futu_code": leg["futu_code"], "success": False,
-                            "error": str(data)})
-        else:
-            try:
-                oid = str(data["orderid"].iloc[0])
-            except Exception:
-                oid = str(data)
-            results.append({"futu_code": leg["futu_code"], "success": True,
-                            "order_id": oid})
-        time.sleep(0.3)
-
-    entry["mode"] = "real"
-    entry["result"] = results
-    entry["ok"] = all(r.get("success") for r in results)
-    if entry["ok"]:
-        entry["pos_id"] = open_position(entry, res.get("contract_size") or 1)
-    _order_log_append(entry)
-    return {"ok": entry["ok"], **entry}
+    strategy_name = str(strat.get("strategy") or "三方向期權策略")
+    expiry = str(strat.get("expiry") or "")
+    spec = {
+        "title": f"{res.get('name') or code}｜{strategy_name}",
+        "subtitle": expiry or None,
+        "legs": legs,
+        "stock": code,
+        "name": res.get("name"),
+        "market": market,
+        "direction": direction,
+        "strategyName": strategy_name,
+        "expiry": expiry or None,
+        "dte": strat.get("dte"),
+        "contractSize": res.get("contract_size") or 1,
+        "winRate": strat.get("win_rate", res.get("win_rate")),
+        "qty": qty,
+        "qtyStep": 1,
+        "qtyMax": 500,
+        "qtyUnit": "張",
+    }
+    return {"ok": True, "type": "advisor_place_order", "spec": spec}
 
 
 
@@ -625,7 +597,7 @@ class H(BaseHTTPRequestHandler):
                 if not codes:
                     return self._json({"ok": False, "error": "冇期權代號"}, 400)
                 return self._json({"ok": True, "quotes": live_quotes(codes)})
-            if u.path == "/order":
+            if u.path in ("/order", "/order_spec"):
                 return self._json(do_order(body))
             if u.path == "/tp_sl":
                 return self._json(set_tp_sl(body))
