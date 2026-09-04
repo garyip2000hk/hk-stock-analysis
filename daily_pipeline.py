@@ -431,6 +431,7 @@ def run():
         vsig = vs.build_signals()
         tradeable = [r for r in vsig if r.get("strategy") not in ("迴避", "觀察")]
         vs_path = BASE / "vol_system.json"
+        vs_path.write_text(json.dumps(vsig, ensure_ascii=False, indent=2, default=str))
         report["sections"]["vol_system"] = {
             "status": "ok",
             "total": len(vsig),
