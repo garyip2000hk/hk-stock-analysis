@@ -64,6 +64,14 @@ def restart_opend():
     return False
 
 
+def ib_gateway_alive(timeout=4):
+    try:
+        with socket.create_connection(("127.0.0.1", 4001), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def latest_trading_day():
     code = (
         "import json,datetime\n"
@@ -135,6 +143,12 @@ def repair_snapshot():
     return _run([PY, "futu_data_importer.py", "--snapshot-only"], 900)
 
 
+def repair_ib_kline():
+    if not ib_gateway_alive():
+        return False, "IB Gateway 死咗，無法補抓"
+    return _run([PY, "ib_data_importer.py", "--days", "30"], 600)
+
+
 def repair_iv():
     return _run([PY, "options_scraper.py", "--backfill", "4"], 600)
 
@@ -176,6 +190,24 @@ def repair_radar():
 
 def repair_strategy_lab():
     return _run([PY, str(SA / "strategy_lab.py")], 900)
+
+
+def repair_atm_iv():
+    code = ("import atm_history as ah\n"
+            "h = ah.load()\n"
+            "ah.build(since=(h.date.max() if not h.empty else None))")
+    return _run([PY, "-c", code], 900)
+
+
+def repair_vol_system():
+    return _run([PY, "vol_system.py"], 600)
+
+
+def repair_daily_pipeline():
+    probe = subprocess.run(["pgrep", "-f", "daily_pipeline.py"], capture_output=True)
+    if probe.returncode == 0 and probe.stdout.strip():
+        return False, "daily_pipeline 已喺度跑緊，唔重複啟動"
+    return _run([PY, "daily_pipeline.py"], 1500)
 
 
 def verify_strategy_lab_source():
@@ -304,12 +336,17 @@ def check_services():
     def repair():
         fixed, notes = [], []
         for svc in bad:
+            if svc == "ib-gateway":
+                # 冷重啟會觸發 2FA 彈窗循環，跳過自動重啟，留畀人手處理
+                notes.append(f"{svc}:跳過重啟（需要2FA批准）")
+                continue
             ok, note = _run(["supervisorctl", "-c", SUP_CONF, "restart", svc], 120)
             notes.append(f"{svc}:{'重啟成功' if ok else '重啟失敗'}")
             if ok:
                 fixed.append(svc)
         time.sleep(8)
-        return len(fixed) == len(bad), "; ".join(notes)
+        skipped = [s for s in bad if s == "ib-gateway"]
+        return len(fixed) == len(bad) - len(skipped), "; ".join(notes)
 
     add("B", "服務進程", "supervisorctl", not bad,
         f"{len(lines)} 個服務，{'全部 RUNNING' if not bad else '異常: ' + '; '.join(bad)}",
@@ -335,6 +372,16 @@ def part_a(ltday):
     check_dated("A", "Futu 快照", "snapshot", str(DB / "Futu/Snapshot"), "snapshot_",
                 ltday, repair=repair_snapshot)
 
+    # IB Gateway（IBKR — 美股／指數／期貨）
+    # ⚠️ 唔自動重啟：冷重啟會觸發 2FA 彈窗循環，只警報由人手處理
+    if not ib_gateway_alive():
+        add("A", "IB Gateway", "ib-gateway 服務", False,
+            "死咗——唔會自動重啟（冷重啟要手機批 2FA），請手動處理")
+    else:
+        add("A", "IB Gateway", "ib-gateway 服務", True, "127.0.0.1:4001 正常")
+    check_file("A", "IB 數據", "kline_ib_day.parquet（美股/指數/期貨日K）",
+               DB / "IB/Kline/kline_ib_day.parquet", 3, repair=repair_ib_kline)
+
     # CCASS（Desktop 同步，Zo 呢邊冇補抓源 → 只警報）
     check_file("A", "CCASS", "holdings.parquet", DB / "CCASS/holdings.parquet", 3)
     check_file("A", "CCASS", "dailylog.parquet", DB / "CCASS/dailylog.parquet", 3)
@@ -349,7 +396,8 @@ def part_a(ltday):
     # 期權數據（IV 過期 → 自動 backfill；下游由 07:30 pipeline 更新）
     check_file("A", "期權 IV", "iv_history.parquet", SA / "options_data/iv_history.parquet",
                3, repair=repair_iv)
-    check_file("A", "期權 ATM", "atm_iv_history.parquet", SA / "options_data/atm_iv_history.parquet", 7)
+    check_file("A", "期權 ATM", "atm_iv_history.parquet", SA / "options_data/atm_iv_history.parquet", 7,
+               repair=repair_atm_iv)
     check_file("A", "期權鏈", "chain_history.parquet", SA / "options_data/chain_history.parquet", 3)
     check_file("A", "策略", "strategies.json", SA / "options_data/strategies.json", 3)
     check_file("A", "業績日曆", "earnings_calendar.json", SA / "options_data/earnings_calendar.json", 7)
@@ -363,9 +411,11 @@ def part_a(ltday):
     check_file("A", "牛熊雷達", "dataset_latest.json", SA / "cbbc_radar/dataset_latest.json", 2,
                repair=repair_radar)
 
-    # 每日報告／波幅系統（由排程 pipeline 生成 → 只警報）
-    check_file("A", "每日報告", "daily_report.json", SA / "daily_report.json", 2)
-    check_file("A", "波幅系統", "vol_system.json", SA / "vol_system.json", 5)
+    # 每日報告（排程 pipeline 生成；排程失手時 08:30 自動補跑）／波幅系統（過期 → 重建）
+    check_file("A", "每日報告", "daily_report.json", SA / "daily_report.json", 1.5,
+               repair=repair_daily_pipeline)
+    check_file("A", "波幅系統", "vol_system.json", SA / "vol_system.json", 5,
+               repair=repair_vol_system)
     check_file("A", "策略實驗室", "strategy_lab.json", SA / "options_data/strategy_lab.json", 3,
                repair=repair_strategy_lab)
     # strategy_lab 主源必須係 OpenD（scrape-fallback = 主流程壞咗）
