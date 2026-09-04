@@ -1,4 +1,6 @@
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+HKT = ZoneInfo("Asia/Hong_Kong")
 """
 daily_pipeline.py — 每日全自動分析 pipeline
 Runs all data import + analysis in sequence.
@@ -23,7 +25,7 @@ sys.path.insert(0, str(BASE))
 
 def run():
     start = time.time()
-    today = datetime.now().date().isoformat()
+    today = datetime.now(HKT).date().isoformat()
     print(f"=== Daily Pipeline — {today} ===\n")
 
     report = {"date": today, "sections": {}}
@@ -69,6 +71,21 @@ def run():
         report["sections"]["futu_data"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
+
+    # 1a+. IB Gateway 數據（美股／指數／期貨日K）
+    print("\n[1a+/14] IB Gateway Data...")
+    try:
+        import ib_data_importer
+        ib_sync = ib_data_importer.run_import(days=30)
+        report["sections"]["ib_data"] = ib_sync
+        if ib_sync.get("status") == "error":
+            print(f"  ⚠ {ib_sync.get('error')}")
+        else:
+            print(f"  ✓ {len(ib_sync.get('ok', []))} 標的，新增 {ib_sync.get('new_rows', 0)} 行，總計 {ib_sync.get('total_rows', 0)} 行")
+    except Exception as e:
+        report["sections"]["ib_data"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
     # 1b. CBBC & Warrants Data
     print("\n[1b/13] CBBC & Warrants Data...")
     try:
@@ -107,8 +124,8 @@ def run():
         from announcement_indexer import get_summary, search, categorize, _load
         from datetime import date, timedelta
         
-        today = datetime.now().date().isoformat()
-        past_30 = (datetime.now().date() - timedelta(days=30)).isoformat()
+        today = datetime.now(HKT).date().isoformat()
+        past_30 = (datetime.now(HKT).date() - timedelta(days=30)).isoformat()
         
         # Load all announcements to find real stats
         all_anns = _load("announcements.json")
@@ -228,7 +245,7 @@ def run():
     print("\n[7/11] Options IV...")
     try:
         import options_scraper, iv_analyzer
-        options_scraper.ingest([datetime.now().date() - timedelta(days=i) for i in range(3, -1, -1)], verbose=False)
+        options_scraper.ingest([datetime.now(HKT).date() - timedelta(days=i) for i in range(3, -1, -1)], verbose=False)
         rows = iv_analyzer.analyse()
         ivs = sorted(r["iv"] for r in rows if r.get("iv") is not None)
         report["sections"]["options_iv"] = {
@@ -295,7 +312,7 @@ def run():
         content_feed.OUT.write_text(
             json.dumps(
                 {
-                    "generated_at": datetime.now().date().isoformat(),
+                    "generated_at": datetime.now(HKT).date().isoformat(),
                     "briefs": briefs,
                 },
                 ensure_ascii=False,
@@ -395,6 +412,18 @@ def run():
         report["sections"]["options_backtest"] = {"status": "error", "error": str(e)}
         print(f"  \u2717 {e}")
 
+    # 14a2. ATM IV 歷史增量重建（vol_system 依賴；唨啇步會靜靜停更）
+    print("\n[14a2/15] ATM IV history incremental rebuild...")
+    try:
+        import atm_history as ah
+        _hist = ah.load()
+        _since = _hist.date.max() if not _hist.empty else None
+        _new = ah.build(since=_since, verbose=False)
+        _last = _new.date.max()
+        print(f"  \u2713 atm_iv_history \u2192 {_last}\uff08{len(_new):,} \u884c\uff09")
+    except Exception as e:
+        print(f"  \u2717 {e}")
+
     # 14b. 波幅交易系統（VRP + Term Structure + Iron Condor）
     print("\n[14b/15] Volatility Trading System (VRP + Condor)...")
     try:
@@ -417,6 +446,43 @@ def run():
         print(f"  ✓ {len(tradeable)} 隻可交易 / {len(vsig)} 隻分析 → {vs_path}")
     except Exception as e:
         report["sections"]["vol_system"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 14c. 鐵鷹三層閘門（VRP × IV × CBBC 避坑）
+    print("\n[14c/15] Condor Gate (VRP×IV×CBBC)...")
+    try:
+        import condor_gate as cg
+        cg_data = cg.build(verbose=False)
+        report["sections"]["condor_gate"] = {
+            "status": "ok",
+            "approved": cg_data["summary"]["approved"],
+            "total": cg_data["summary"]["total"],
+            "approved_codes": [c["stock_code"] for c in cg_data["candidates"]
+                               if c["verdict"] == "APPROVED"],
+            "output": str(cg.OUT),
+        }
+        print(f"  ✓ {cg_data['summary']['approved']}/{cg_data['summary']['total']} 隻過閘 → {cg.OUT}")
+    except Exception as e:
+        report["sections"]["condor_gate"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+    # 14c. 鐵鷹三層閘門（VRP × IV × CBBC）
+    print("\n[14c/15] Condor Gate (VRP × IV × CBBC)...")
+    try:
+        import condor_gate as cg
+        gd = cg.build(recompute_backtest=False, verbose=False)
+        report["sections"]["condor_gate"] = {
+            "status": "ok",
+            "total": gd["summary"]["total"],
+            "approved": gd["summary"]["approved"],
+            "blocked": gd["summary"]["blocked"],
+            "approved_codes": [c["stock_code"] for c in gd["candidates"]
+                               if c["verdict"] == "APPROVED"],
+            "output": str(BASE / "options_data" / "condor_gate.json"),
+        }
+        print(f"  ✓ {gd['summary']['approved']} 隻通過 / {gd['summary']['total']} 隻候選")
+    except Exception as e:
+        report["sections"]["condor_gate"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
     print("\n[15/15] Saving report...")
