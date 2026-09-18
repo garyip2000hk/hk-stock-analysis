@@ -22,14 +22,15 @@ def _sample_dates(values: list[str], limit: int) -> list[str]:
     return sorted({values[round(i * step)] for i in range(limit)})
 
 
-def _flow(before: dict, after: dict) -> dict:
+def _flow(before: dict, after: dict, pid: str = "") -> dict:
     before_shares = int(before.get("shares", 0)) if before else 0
     after_shares = int(after.get("shares", 0)) if after else 0
     before_pct = float(before.get("percentage", 0)) if before else 0.0
     after_pct = float(after.get("percentage", 0)) if after else 0.0
+    anchor = after or before or {}
     return {
-        "participant_id": (after or before).get("participant_id", ""),
-        "name": (after or before).get("name", ""),
+        "participant_id": anchor.get("participant_id", pid),
+        "name": anchor.get("name", ""),
         "shares_before": before_shares,
         "shares_after": after_shares,
         "delta_shares": after_shares - before_shares,
@@ -92,10 +93,12 @@ def track(stock: str, start: str, end: str, points: int = 24) -> dict:
         tracked_ids.update(h["participant_id"] for h in snap.get("top_holders", [])[:20])
     tracked = []
     for pid in tracked_ids:
-        flow = _flow(before.get(pid), after.get(pid))
+        flow = _flow(before.get(pid), after.get(pid), pid)
         series = []
         for snap in snapshots:
             holder = next((h for h in snap.get("participants", []) if h["participant_id"] == pid), None)
+            if holder and not flow["name"]:
+                flow["name"] = holder.get("name", "")
             series.append({"date": snap["date"], "shares": holder["shares"] if holder else 0, "percentage": holder["percentage"] if holder else 0})
         flow["series"] = series
         tracked.append(flow)
