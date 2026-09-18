@@ -210,6 +210,10 @@ def repair_daily_pipeline():
     return _run([PY, "daily_pipeline.py"], 1500)
 
 
+def repair_corp_actions():
+    return _run([PY, "corp_actions_updater.py"], 600)
+
+
 def verify_strategy_lab_source():
     def _do():
         try:
@@ -308,6 +312,43 @@ def check_kline(ltday):
 
     ok, detail = verify()
     add("A", "Futu K線", "kline_day.parquet", ok, detail, None if ok else repair_kline, verify)
+
+
+def check_corp_actions(ltday):
+    """財技動作 cache 內容級檢查（2026-09-18「570 永不變」斷更 bug 之後新增）。
+    mtime 唔可靠（updater added=0 時唔寫檔），所以直接睇 cache 入面最新日期：
+    落後最近交易日 >5 日（公告 sync 延遲＋假期容差）＝異常 → 自動補跑 updater。"""
+    cache_path = SA / "corp_actions_cache.json"
+
+    def _norm(d):
+        # curated 舊條目有 DD/MM/YYYY 格式，統一轉 ISO；轉唔到就跳過
+        if not isinstance(d, str):
+            return None
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(d.strip(), fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        return None
+
+    def verify():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            total = sum(len(lst) for lst in data.values() if isinstance(lst, list))
+            dates = [n for lst in data.values() if isinstance(lst, list)
+                     for e in lst if isinstance(e, dict)
+                     for n in (_norm(e.get("date")),) if n]
+            if not dates:
+                return False, "cache 冇任何可讀日期嘅條目"
+            latest = max(dates)
+            lag = (datetime.strptime(ltday, "%Y-%m-%d") - datetime.strptime(latest, "%Y-%m-%d")).days
+            return lag <= 5, f"{total} 條，最新 {latest}（交易日 {ltday}，滯後 {lag} 日）"
+        except Exception as e:
+            return False, f"讀唔到: {e}"
+
+    ok, detail = verify()
+    add("A", "財技動作", "corp_actions_cache.json", ok, detail,
+        None if ok else repair_corp_actions, verify)
 
 
 def check_services():
@@ -414,6 +455,8 @@ def part_a(ltday):
     # 每日報告（排程 pipeline 生成；排程失手時 08:30 自動補跑）／波幅系統（過期 → 重建）
     check_file("A", "每日報告", "daily_report.json", SA / "daily_report.json", 1.5,
                repair=repair_daily_pipeline)
+    # 財技動作 cache（前端「財技動作」tab 數據源；曾斷更兩個月凍結喺 570 條）
+    check_corp_actions(ltday)
     check_file("A", "波幅系統", "vol_system.json", SA / "vol_system.json", 5,
                repair=repair_vol_system)
     check_file("A", "策略實驗室", "strategy_lab.json", SA / "options_data/strategy_lab.json", 3,
@@ -452,6 +495,8 @@ def part_b():
                repair=restart_service("hsi-strangle-api"))
     check_http("B", "zo.space", "主頁", "https://garysir.zo.space/")
     check_http("B", "zo.space", "stock-analysis", "https://garysir.zo.space/stock-analysis")
+    check_http("B", "zo.space", "all-corpactions API", "https://garysir.zo.space/api/all-corpactions",
+               timeout=25)
     check_http("B", "zo.space", "auto-trading", "https://garysir.zo.space/auto-trading")
     check_http("B", "zo.space", "fintech-course", "https://garysir.zo.space/fintech-course")
     check_http("B", "zo.space", "fx-exchange", "https://garysir.zo.space/fx-exchange")
