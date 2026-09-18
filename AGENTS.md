@@ -70,6 +70,21 @@ python3 ccass_snapshot.py 01241 --from 2025-08-01 --to 2026-07-31   # 加減倉�
 python3 validate_ccass.py                                # 回歸測試（必跑）
 ```
 
+## 倉位追蹤 position_tracker.py（2026-09-18 新增）
+
+用本地 CCASS change-log forward-fill 重建每個參與者喺指定期間各有效變動日嘅實際餘額，
+輸出：有效基準日／最新有效日、集中度時間線（top5/top10 逐點）、收貨／加倉排行、
+派貨／減倉排行、可選券商染色序列。百分比一律以 `issued_shares.parquet` 已發行股數做分母。
+
+```bash
+python3 position_tracker.py 01241 2025-09-18 2026-09-16 --points 24   # 輸出 JSON
+```
+
+- API：`/api/position-track?stock=&from=&to=&points=`（zo.space，25s timeout、10 分鐘 cache、single-flight、30 req/min/IP）
+- 前端：`https://garysir.zo.space/stock-analysis/position-track`；財技分析主頁 tab「倉位追蹤」直跳
+- 開始日唔係有效變動日時，回傳 `effective_from`（實際採用嘅基準日），UI 以顯示日期為準
+- 詳情同限制見 `POSITION_TRACKING.md`；驗證案例 01241（30 收貨／24 派貨參與者）
+
 ## 資料覆蓋
 
 - 本地 change-log：2023-01-03 → 2026-07-31
@@ -272,6 +287,25 @@ log 去 `/dev/shm/futu-data-scheduler.log`。唔燒 AI 額度。
 之前用 `datetime.now()`（伺服器 UTC）—— 凌晨 01:30 HKT 嘅快照會寫落**尋日**嘅檔名
 （覆蓋舊檔之餘，健康檢查搵唔到今日檔 → 假警報）。log 時間戳都係 HKT。
 
+## IB Gateway 數據匯入（2026-08-22 新增）
+
+`ib_data_importer.py` — 由 IBKR IB Gateway (127.0.0.1:4001, ib_async clientId=91) 拉
+美股／指數／期貨日K，輸出去 `Desktop/db/IB/Kline/kline_ib_day.parquet`（append-only，
+按 date+symbol 去重）。欄位：date/symbol/sec_type/front_month/OHLC/volume。
+
+21 個標的：美股龍頭 7（AAPL/NVDA/MSFT/GOOGL/AMZN/META/TSLA）、ETF 2（SPY/QQQ）、
+港股對照 3（700/9988/2800）、指數 4（SPX/NDX/INDU/VIX）、期貨 5（ES/NQ/YM/HSI/MHI，
+自動揀 front month，用 lastTradeDate 排序，唔依賴 localSymbol 格式——港交所係 `HSI AUG 26`）。
+
+CLI：`--days N`（default 365）。`run_import(days)` interface 俾 daily_pipeline step 1a+
+call（每日 30 日增量）。連接失敗會 fail fast（connectAsync timeout 15s），唔會 hang。
+
+⚠️ **期貨歷史深度限制**：front-month 轉倉令歷史由新合約上市日先開始——
+首次全年抓取後：ES 249 日、YM 179 日、MHI 136 日（其餘 365 日齊）。要完整歷史需要
+逐個月拼接舊合約（未做，有需要再加）。
+⚠️ **Gateway 死咗唔可以自動重啟**：冷重啟會觸發 2FA 彈窗循環。健康檢查只警報，
+數據檔唔夠新時先試補抓（要 gateway 生先）。詳見根 AGENTS.md。
+
 ## 牛熊波幅雷達重建（2026-08-18，OpenD 版取代 Manus 私有 repo）
 
 `cbbc_radar_builder.py` — 每晚生成 gsmart-box「牛熊波幅雷達」Dataset JSON：
@@ -296,19 +330,24 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
 **「先」「後」判定（2026-08-21 改用用戶 Google Sheet「HSI ADR CK」工作頁邏輯，已移植入 builder）**：
 - 「先」（`previous_night_premarket`）：夜期（HSImain 夜市收 vs 日市收，OpenD）+ **HSIADR 指數變化**。±50 點 **AND 規則**——先跌 = ADR < −50 **且** 夜期 < −50；先升 = ADR > 50 **且** 夜期 > 50；任何一邊 |變化| ≤ 50 → 先窄幅波動（OR）；兩邊過 50 但相反 → 窄幅（sheet 冇定義，保守）。得一邊有數據時照計嗰邊（confirmed=False）。
   - **HSIADR 數據源**：OpenD 唔支援美股指數報價（get_market_snapshot 回「暂不支持美股指数」），所以主源 = sheet 同款 futunn 頁面 `https://www.futunn.com/hk/index/.HSIADR-US` curl scrape（regex `mg-r-8 price direct-up/down` + `change-price`；頁面個變化 = HSIADR − HSI 昨日日市收，同 sheet C4 同口徑）；scrape 失敗先後備 `ADR_BASKET` 恒指權重加權籃（OpenD 美股，覆蓋~20% 權重只係方向代理）。`premarket.adrSource` 標明用咗邊個源。
-- 「後」（`_sheet_back_direction`，存 `sheetBack`）：GS 相對期指張數邏輯——動態 200 點格（anchor=round(close,100)，同 sheet 標籤格線一致），上下各取最近 3 格；可達條件 = 上方格（格頂−close）< DayRange、下方格（close−格底）< DayRange，其中 **DayRange =（昨日 High−Low）/2**（日 K；攞唔到後備 EM=close×VHSI/√252）；相對期指張數 upSum−downSum > +500 → 上屠熊、< −500 → 下殺牛、否則窄幅。
+- 「後」（`_sheet_back_direction`，存 `sheetBack`）：GS 相對期指張數邏輯——動態 200 點格（anchor=round(close,100)，同 sheet 標籤格線一致），上下各取最近 3 格；可達條件 = 上方格（格頂−close）< DayRange、下方格（close−格底）< DayRange，其中 **DayRange = EM = close×VHSI/√252（今日預期 1σ 波幅，前瞻；2026-09-08 改——舊（昨日 High−Low）/2 喺低波幅日過窄，令最近牛熊區全「不可達」而誤判窄幅）**；相對期指張數 upSum−downSum > +500 → 上屠熊、< −500 → 下殺牛、否則窄幅。
   - **相對期指張數 = 街貨量 ÷（換股比率 × 50）**，2026-08-21 對 gswarrants 官方表（hsi-cbbc-outstanding-distribution）對數 19/19 全中（遠區誤差 ≤0.3%），完全由 OpenD 計，唔使依賴 GS scrape。近現價區會因即日收回/數據日差異有出入，屬預期。
   - ⚠️ 用戶 sheet 本身有 stale-label 缺陷：D 欄區間標籤（25,700-25,899 式）同 GS 實際表（25,800-25,999 式固定格）唔齊，下方最近區標成 25,000（實際 25,500-25,699），令 F 欄距離長期高估 → down_sum 成日當 0。移植版用乾淨數據重新 bin，冇呢個問題（同一日 sheet 話「後向上」，乾淨數據會係「後窄幅」——08-20 close 25,698 案例 diff=+320）。
-- 舊規則（±100 OR、weightedScore ±0.25 判後向）已廢；weightedScore 仍然計（targetFocus 用）。`refresh_premarket`（08:45）重組 verdict 時後向改讀 `day0["sheetBack"]`。
+- **`targetFocus` 方向優先（2026-09-04 用戶規則）**：開市前約距目標跟方向走，唔再淨係睇 `weightedScore`。判市向上（先升／上屠熊）→ 目標揀上方熊證區；向下（先跌／下殺牛）→ 下方牛證區；冇方向先 fallback `weightedScore ±0.25` 揀邊。抽咗做 `_target_focus()`，`build_day` 同 `refresh_premarket`（08:45 重算 premarket）都 call 佢。
+- 舊規則（±100 OR、weightedScore ±0.25 判後向）已廢；weightedScore 仍然計（targetFocus 用）。
 
-`cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每日 21:30 HKT 跑，
-失敗 22:00/22:30 重試。entrypoint 用 `bash -c 'source /root/.zo_secrets; ...'`
-去食 Secrets。
+`cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑 builder；**啟動 catch-up（2026-09-17）**：主機遲過 08:00–09:10 窗口先起身（例如重啟）會喺 16:00 前補跑一次今日 build（判定每日仍只做一次）
+（ADR CK 新邏輯喺 builder 入面，跟住呢個排程自動行），失敗 08:40/09:10 重試；08:45
+`--push-only` 純重推一次（**2026-09-09 用戶規則：判定每日只做一次（08:00），其他時間唔重新判定**；只重貼同一份 dataset 防 Manus 08:40 舊格式覆蓋）。
+entrypoint 用 `bash -c 'source /root/.zo_secrets; ...'` 去 eat Secrets。
+新邏輯已於 2026-08-21 smoke test 全路徑通過（HSIADR scrape／±50 AND／sheetBack／
+完整 build_day dry-run）；首次自動跑 = 2026-08-24（週一）08:00。Manus 08:40 push
+暫時唔停——當免費後備，等新邏輯穩定 1-2 星期先停。
 
 ### 牛熊波幅雷達（gsmart-box，OpenD 重建版，08-18）
 
 - `cbbc_radar_builder.py` — 每日生成 dataset JSON：`HK.800000`(恒指) + `HK.800125`(VHSI) 快照 + 本地 CBBC scrape 名單逐隻 batch snapshot 攞 `wrt_recovery_price` / `wrt_street_vol`；200 點 zone 聚合；EM=close×VHSI/√252；verdict 用 weightedScore ±0.25；歷史日 append 存 `cbbc_radar/days/<date>.json`
-- `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑（失敗 08:40/09:10 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`；**08:45 重算 premarket（`--refresh-premarket`：夜期/ADR 朝早未齊就補，覆蓋變好先改 dataset 同 verdict）再重推一次**—— Manus 舊 pipeline 仍每日 08:40 推舊格式數據覆蓋，重推保證我哋係最終版本；根治要喺 Manus 停咗佢個每日推送任務
+- `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑（失敗 08:40/09:10 重試），成功自動 POST 上 gsmart-box `/api/cbbc/update`；**08:45 `--push-only` 純重推一次（唔重算、唔重新判定——2026-09-09 用戶規則：每日只喺 08:00 判一次）**—— Manus 舊 pipeline 仍每日 08:40 推舊格式數據覆蓋，純重推保證我哋係最終版本；根治要喺 Manus 停咗佢個每日推送任務
 - **密鑰喺 `stock-analysis/.cbbc_radar_secrets`**（chmod 600，已 gitignore）——平台 Secrets 同步有延遲/唔可靠，排程器 entrypoint 係 source `/root/.zo_secrets` 再 source 呢個檔
 - **⚠️ Manus edge WAF 會 403 擋 Python-urllib 預設 UA**（唔係密鑰錯！密鑰錯係 401）——push 一定要帶 browser UA header
 - 盤前 premarket（2026-08-21 第二次定案：改用「HSI ADR CK」sheet 邏輯，詳見上面公式段）：**夜期用 HSImain 快照**（朝早 08:00 跑時 `last_price`=尋晚 T+1 段收、`prev_close`=昨日日市收；時間窗驗證用**結算日 17:00～翌日 03:05** 做基準——週五晚嗰節夜市收喺週六 03:00，用 prediction_date 做基準會喺週一漏咗；開市後 live 價亦會被呢個窗擋走）——⚠️ 唔好用 futu 期貨歷史 K線，T+1 夜期段延遲入庫，朝早跑根本未有尋晚 bars（曾因此攞錯舊夜期 → 假 −256.9）。**ADR 主源 = futunn HSIADR 指數頁 scrape**（OpenD 無美股指數；後備 = `ADR_BASKET` 恒指權重加權籃，等權教訓：網易-5.9%/B站-3.8% 拖到假 -262 點）。方向規則：±50 AND（兩邊同向過 50 先有方向，任何一邊唔夠 = 先窄幅）。HSI open/high/low 一樣由日 K 攞（快照開市前未更新、開市後歸零）
@@ -373,3 +412,127 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
   每條顯示期望值／勝率／Sharpe／盈虧比／最壞單筆，展開見成交樣本。
   頁頂固定警示：期權賣方唔可以只睇勝率。
 
+
+## 鐵鷹三層閘門（2026-08-22 新增）
+
+`condor_gate.py` — 將真回測驗證過嘅過濾規則變成每日訊號＋落盤門票：
+- L0 結構：期權鏈砌唔到鷹（行使價／delta／OI 唔達標）→ 擋（有閘都冇盤可落）
+- L1 VRP ≥ 5（點位 VRP，`vrp_lookup.parquet`，前瞻已實現波幅，滯後 ~21 交易日）
+- L2 IV ≥ 34（vol_system.json 嘅 ATM IV）
+- L3 CBBC 擠壓雷達（`strategy_lab.json` squeeze_radar，STRONG_SQUEEZE 等擋）
+
+**落盤門票（`tickets` 欄，每日自動生成）**：每隻過閘股有四腳富途代碼
+（`HK.{hkats}{YYMMDD}{C|P}{strike×1000}`，經 `auto-trading/option_codes.py`）、
+收/買方向、權金、損益兩平、止賺止蝕價、時間止蝕日、建議注數
+（資本 2%/筆，上限 10 張，資本讀 `auto-trading/config.json`）。
+
+**止賺止蝕回測驗證（2026-08-22，閘門 646 筆逐日 mark-to-market，真結算價）**：
+持到期 EV −$15.5k/筆、最壞 −$397k → **TP50%＋SL2×＋14 DTE 時間止蝕**：
+EV −$995/筆、最壞 −$18.5k（最佳組合）；SL 2× 單獨已擋走大部分尾巴
+（−$15.5k → −$1.2k）。TP 單獨幾乎無用。規則：買回價 ≤ 0.5×權金止賺、
+≥ 2×權金止蝕、現價收市穿短倉行使價次日離場、剩 14 日未觸發照平。
+即係話：最佳管理都係輕微負期望 —— 門票係風控工具，唔係提款機。
+
+輸出 `options_data/condor_gate.json`；`--backtest` 重跑閘門對照回測（~3 分鐘）。
+API `/api/condor-gate` → 私人頁面 `https://garysir.zo.space/stock-analysis/condor-gate`。
+`daily_pipeline.py` 第 14c 步每日自動跑（重用 cache 回測證據，唔每日重算）。
+
+**回測對照結論（2025-10 → 2026-08，129 標的，真結算價）**：基準鐵鷹 EV −$3,629/筆；
+現用閘門（VRP≥5 + IV≥34）EV −$2,048/筆、勝率 62.7%。全門檻掃描（VRP 0–15 × IV 34–50）
+**冇任何組合去到正期望** —— gate 價值係止蝕（總虧損 −$1,100 萬 → −$130 萬），唔係保證賺錢。
+單股鐵鷹現時唔可行；恒指 strangle 系統先係正期望嗰邊。
+
+## 美股策略系統（2026-08-22 新增）
+
+三個模組共用 `Desktop/db/IB/Kline/kline_ib_day.parquet`（IB 日K）：
+
+- `us_strategies.py` — ES-NQ 相對價值價差（rel=ln(NQ/ES) 20d z≤-1 入場、z≥0 或 10 日离场；回測 364 日 n=13 勝率 69.2% 平均 +0.22%，樣本細）、ES 抄底（前日 ≤-1% → 次日 c2c +0.67% n=36）、VIX regime 賣方溢價統計（SPX 20d 前瞻 realized vs VIX，四桶全正）。輸出 `options_data/us_strategies.json`。
+- `us_condor_gate.py` — SPX 週五入場 DTE5 strangle/condor，band 1.15×EM、wings 2.2×EM，VIX 閘門注碼同 HSI 系統一致（cross_market.vix_regime）。回測 n=70：裸 strangle 平均 -3.4pts（贏細輸大），**condor + no_stress 閘 = 平均 +3.0pts、勝率 80.6%、最差 -132pts**。期權金用 BS（IV=VIX）估計——IB 帳戶無 OPRA 訂閱攞唔到真 chain，tick 價係估計值。輸出 `options_data/us_condor_gate.json`（含今日 ticket：strikes/credit/sizing）。
+- `us_wheel.py` — 七大科技股（AAPL/AMZN/GOOGL/META/MSFT/NVDA/TSLA）Wheel 掃描：short put delta 0.30 DTE30 + covered call delta 0.25，IV 用 HV20 代理；業績日過濾用 Yahoo `quoteSummary?modules=calendarEvents`（失敗 fallback 唔過濾＋標 note）。輸出 `options_data/us_wheel.json`。
+- Automation「美股開市前策略日報」：週一至五 21:15 HKT 跑三模組 → Telegram 簡報，只出訊號唔落盤。
+
+⚠️ Gap-fill（隔夜缺口填回）策略已測試：39% funding fill、無 edge，**唔好再做**。
+⚠️ 美股期權真實 chain／成交價要 OPRA market data 訂閱；未訂閱前所有 tick 價當估計。
+
+### SPX Iron Condor paper 實戰系統（2026-08-22 新增）
+
+- `us_condor_service.py` — 常駐服務 `us-condor-api`（http private，port 8893）：
+  `GET /signal /positions /track /config /health`、`POST /tick /config`。
+  狀態 `options_data/us_condor_state.json`（positions/settled/log，純 paper，冇真盤路徑）。
+- `POST /tick` 週邏輯：結算到期倉（entry→expiry 每日 high/low 保守觸及，同回測口徑）＋
+  若最新 bar 係週五且冇持倉且 regime ≠ stress → 用週五收市開新倉（credit 用 BS 估計）。
+- 結算 P&L：strangle 觸及計超額點數、condor 以 wing 封頂；×$100/點×size_mult。
+- 私人面板 `https://garysir.zo.space/us-condor`＋API `/api/us-condor`（proxy 8893）。
+- Automation「SPX Iron Condor 週結算」：每週六 08:30 HKT（daily_pipeline 07:30 之後）
+  跑 /tick＋發 Telegram 週報（結算／新倉／skip 原因／累積戰績 vs 回測參考）。
+- 首筆 paper 倉 2026-08-21 入場：7500/7850 strangle（wings 7325/8025）credit 22.6pts，08-28 到期。
+- ⚠️ Paper only：IB 帳戶無 OPRA 訂閱，真實 chain/成交價攞唔到；真盤要人手喺 IB TWS 落盤。
+
+
+## SPY 週鐵鷹執行系統（富途落盤，2026-08-22）
+- SPX paper 版（8893）係回測對照；可執行版用 **SPY 週期權**（富途有報價有落單），
+  服務 `us_spy_condor_service.py` port 8894，monitor `us_condor_monitor.py` 常駐。
+- 方法論同 `us_condor_gate.py` 完全一致（1.15×EM band、2.2×EM wings、VIX regime 注碼、週五入場下週五到期）；
+  分別係權金用富途即市 bid/ask（可執行淨權金），唔係 BS 估計。
+- ⚠️ SPY 週期權有週一/三/五到期——`build_ticket` 淨揀週五（`weekday()==4`），千祈唔好改返 `expiries[0]`。
+- 落單：賣腿用 `OrderType.NORMAL` limit=bid，買翼 limit=ask；real 要 `FUTU_TRADE_PWD` unlock（同 hsi-strangle 同一 secret）。
+- Monitor 規則（只喺美股時段生效）：週五 15:50 ET 自動開倉；升穿/跌穿短腿行使價止蝕；
+  買回成本 ≤ 50% 權金止賺；到期日 15:30 ET 強制平。全部經服務 /open、/close，paper 模式淨記錄。
+- 富途美股模擬盤（acc 10576499）實測落單+撤單通過；真盤未開，先跑 3-4 週核實成交權金。
+
+
+## 三方向期權策略顧問（2026-08-24 新增）
+
+用戶輸入股票代號＋揀「買升／窄幅波動／買跌」→ 系統喺該方向所有候選策略 × 三個到期月
+入面逐個計勝率＋期望值，排出最着數買法。面板 `https://garysir.zo.space/option-advisor`。
+
+- `direction_advisor.py` — 核心。候選策略（每方向約 5 個）：
+  - 升：Long Call（ATM）／Bull Call Spread（賣 0.22Δ 或 0.32Δ）／Bull Put Spread（賣 0.28Δ Put＋買 0.12Δ 翼）／Short Put 0.28Δ
+  - 窄幅：Iron Condor（賣 0.20Δ 兩邊＋買 0.08Δ 翼）／Short Strangle（賣 0.20Δ 兩邊）／Iron Butterfly（賣 ATM 兩邊＋翼）
+  - 跌：Long Put／Bear Put Spread×2／Bear Call Spread／Short Call（同升鏡像）
+  - 到期月分桶：短(10-35日)／中(35-70)／長(70-130)，每桶揀未平倉最多嗰個；冇嘢就揀最近月
+- 計法沿用 `strategy_engine.evaluate`：HV20 對數常態積分計勝率＋期望值（唔係用 IV），
+  評分＝勝率分＋EV/最大蝕比（cap ±3）＋正EV bonus，無限風險（裸賣）直接 −3。
+- 每腳附富途期權代碼（`auto-trading/option_codes.py`）——面板只係分析，落盤要人手喺富途做。
+- `direction_advisor_service.py` — 常駐服務 `option-advisor-api`（http private，port 8895）：
+  `GET /health /stocks /analyze?code=<5位>&dir=up|flat|down`。結果 10 分鐘 cache（key code:dir）；
+  `iv_analyzer.analyse()` 全鏈結果亦有 in-process cache。**要用 `/usr/local/bin/python3`**（pandas）。
+- zo.space：頁 `/option-advisor`（private）＋API `/api/option-advisor`（proxy 8895，`?path=` 映射）。
+- ⚠️ 數據係 HKEX 每日結算價（非即市 bid/ask）；首次分析要 ~10 秒（拆全鏈）。
+- ⚠️ 2026-08-24 實測 00700：窄幅方向候選全部負期望（Short Strangle −$1,297 等）——
+  同「真回測 vs 舊鐵鷹」結論一致：港股單股賣方冇無腦正期望。頁面全部負期望時會彈警告。
+
+## build_leaderboard.py 集中度排行榜（2026-08-30 修正）
+
+**點解之前會出現 >100% 嘅「高度集中」行** — 兩個原因，都已修：
+
+1. **股票代號循環再用**：`shortnames.parquet` 一個代號可以有幾個 issue_id
+   （已除牌舊公司 + 現役公司，例 08371 = GRAND T G GOLD 2006-2013 +
+   TASTEGOURMET GP 2014-）。dailylog 淨係會記有變動嘅 issue，舊公司殘留行
+   撞埋 `issued_shares`（現役公司）分母就爆大。修法：按代號揀 `use_date`
+   最新嘅 issue_id 做「現役」，其他跳過（`active_issue_by_sc`）。
+2. **CCASS c5 冇理由大過已發行股數**：大過即係分母過時／錯
+   （例 34xxx ETF 單位每日增減，`issued_shares.parquet` snapshot 停喺
+   2026-05-22）。修法：fallback cap，`c5 > issued` 嘅行直接跳過唔入榜，
+   結尾會 print「Data integrity: skipped N row(s)」。
+
+ETF（34xxx）本身有機會合理咁貼近 100%（全部單位都喺 CCASS），唔好當 bug。
+已驗證：08371 由 204.98% GRAND T G GOLD 變返 TASTEGOURMET GP 22.09%，
+03160/03137/03848/02546/03488/03444 全部剔除，榜內 0 行 >100%。
+
+## 長橋 MCP 數據匯入（2026-09-04 新增）
+
+`lb_signals_pull.py` — 經 hosted MCP（`https://mcp.longbridge.com/mcp`，skill
+`Skills/longbridge-mcp` 嘅 `lb.py` 做客戶端，token 存 `Skills/longbridge-mcp/scripts/.lb_token.json`）
+拉兩樣嘢去 `imported/lb_signals.json`：
+1. **即市異動廣度**（`anomaly`，全市場急速拉升／加速下跌）→ `anomaly_breadth`（牛熊 bias），
+   供牛熊雷達 kill signal 做**日內確認**——雷達話「上掃熊」而異動廣度 BULL，兩訊號夾先算齊；
+   `freshness_min` + `stale` 標記批次新舊（收市後 feed 凍結屬正常）。
+2. **AI 訊號**（`signals`，事件驅動策略觀點，HK 市約 20 條）→ 供 corp_scanner／公告解讀補充。
+
+CLI：`--print` 只印摘要。`call(tool, args)` 係通用 wrapper，日後想加長橋其他工具
+（capital_flow / short_positions / broker_holding / warrant_list 等）直接喺呢個檔加。
+
+⚠️ 權限：現 token scope 得 watchlist——報價／K線／異動／訊號／牛熊證 OK；**賬戶、持倉、
+落單要 403308**，要重生成 code（https://open.longbridge.com/connect 剔齊權限）。落單工具
+本身有兩步確認（dry run → confirmation_code）。
