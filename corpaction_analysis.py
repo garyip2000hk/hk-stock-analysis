@@ -252,6 +252,80 @@ def _concentration_and_positions(code: str, event_date: str) -> dict:
     }
 
 
+WATCH_LEVELS = {
+    "high": ("\u2b50 \u91cd\u9ede\u76e3\u5bdf", "\u5efa\u8b70\u52a0\u5165\u91cd\u9ede\u76e3\u5bdf\uff1a\u8ffd\u8e64\u4e8b\u4ef6\u5b8c\u6210\u9032\u5ea6\u3001\u4e8b\u5f8c CCASS \u6301\u5009\u8b8a\u5316\u3001\u5927\u984d\u6536\u8ca8\u5238\u5546\u53ca\u6709\u7121\u9023\u7e8c\u8ca1\u6280\u52d5\u4f5c\u3002"),
+    "mid": ("\ud83d\udc41 \u503c\u5f97\u7559\u610f", "\u53ef\u52a0\u5165\u89c0\u5bdf\u540d\u55ae\uff0c\u6bcf\u9031\u8907\u67e5\u4e00\u6b21\u6301\u5009\u8207\u80a1\u50f9\u8b8a\u5316\u3002"),
+    "low": ("\u66ab\u7121\u9700\u91cd\u9ede\u76e3\u5bdf", "\u76ee\u524d\u8a0a\u865f\u4e0d\u5f37\uff0c\u6b63\u5e38\u89c0\u5bdf\u5373\u53ef\uff1b\u82e5\u5f8c\u7e8c\u6709\u65b0\u516c\u544a\u6216\u6301\u5009\u7570\u52d5\u518d\u91cd\u65b0\u8a55\u4f30\u3002"),
+}
+
+
+def _watch_verdict(code: str, ev: dict, conc: dict, dilution: dict | None, price: dict, status: str) -> dict:
+    score = 0
+    reasons = []
+    if status in ("proposed", "pending", "in_progress", "awaiting_approval"):
+        score += 2
+        reasons.append(f"\u4e8b\u4ef6\u72c0\u614b\u300c{STATUS_LABEL.get(status, status)}\u300d\uff0c\u6d41\u7a0b\u4ecd\u5728\u9032\u884c\uff0c\u5b8c\u6210\u5f8c\u80a1\u6b0a\u7d50\u69cb\u53ef\u80fd\u5927\u5e45\u8b8a\u5316")
+    elif status in ("withdrawn", "lapsed"):
+        score -= 3
+        reasons.append("\u4e8b\u4ef6\u5df2\u6492\u56de\uff0f\u5931\u6548\uff0c\u77ed\u671f\u5167\u7121\u9700\u8ffd\u8e64")
+    lvl = conc.get("verdict_level")
+    if lvl == "high":
+        score += 2
+        reasons.append(f"\u4e8b\u5f8c\u7c4c\u78bc\u660e\u986f\u6b78\u908a\uff08\u982d10\u5927\u4f54\u6bd4 {conc.get('delta_top10', 0):+.1f}pp\uff09")
+    elif lvl == "mid":
+        score += 1
+        reasons.append(f"\u4e8b\u5f8c\u8f15\u5ea6\u6b78\u908a\uff08\u982d10\u5927\u4f54\u6bd4 {conc.get('delta_top10', 0):+.1f}pp\uff09")
+    elif lvl == "spread":
+        reasons.append("\u4e8b\u5f8c\u7c4c\u78bc\u53cd\u800c\u5206\u6563\uff0c\u672a\u898b\u6b78\u908a\u8de1\u8c61")
+    big = [a for a in conc.get("accumulators", []) if a.get("delta_percentage", 0) >= 1.0]
+    mild = [a for a in conc.get("accumulators", []) if 0.5 <= a.get("delta_percentage", 0) < 1.0]
+    if big:
+        score += 2
+        names = "\u3001".join(f"{a['name'][:24]}({a['delta_percentage']:+.2f}pp)" for a in big[:3])
+        reasons.append(f"{len(big)} \u500b\u5238\u5546\u55ae\u4e00\u7a97\u53e3\u6536\u8ca8 \u2265 1% \u80a1\u6b0a\uff1a{names}")
+    elif mild:
+        score += 1
+        reasons.append(f"\u6709\u5238\u5546\u660e\u986f\u52a0\u5009\uff08\u6700\u5927 {mild[0]['delta_percentage']:+.2f}pp\uff09")
+    if dilution and dilution.get("new_share_pct") is not None:
+        pct = dilution["new_share_pct"]
+        if pct >= 30:
+            score += 2
+            reasons.append(f"\u6524\u8584\u5e45\u5ea6\u5927\uff1a\u65b0\u80a1\u4f54\u767c\u884c\u5f8c {pct}%\uff0c\u4e0d\u8ddf\u8db3\u8a8d\u8cfc\u5373\u88ab\u6d17\u5009")
+        elif pct >= 10:
+            score += 1
+            reasons.append(f"\u65b0\u80a1\u4f54\u767c\u884c\u5f8c {pct}%\uff0c\u6709\u4e00\u5b9a\u6524\u8584")
+    events = _load_cache().get(code, [])
+    evd = _d(ev.get("date", "1970-01-01"))
+    nearby = [e for e in events
+              if e.get("date") and _d(e["date"]) != evd
+              and abs((_d(e["date"]) - evd).days) <= 180
+              and CATEGORY.get(e.get("type", ""), "other") in ("rights", "placing", "offer", "cb", "consolidation", "privatize")]
+    if len(nearby) >= 2:
+        score += 2
+        chain = "\u3001".join(f"{e['date'][:7]} {e.get('type','')}" for e in nearby[:3])
+        reasons.append(f"\u540c\u80a1 \u00b1180 \u65e5\u5167\u4e32\u806f\u51fa\u73fe\u591a\u5b97\u6524\u8584\uff0f\u6b78\u908a\u578b\u8ca1\u6280\u52d5\u4f5c\uff08{chain}\uff09\uff0c\u5c6c\u8ca1\u6280\u80a1\u5e38\u898b\u624b\u6cd5")
+    elif len(nearby) == 1:
+        score += 1
+        reasons.append(f"\u524d\u5f8c 180 \u65e5\u5167\u53e6\u6709\u4e00\u5b97\u76f8\u95dc\u8ca1\u6280\u52d5\u4f5c\uff08{nearby[0]['date'][:7]} {nearby[0].get('type','')}\uff09")
+    if price.get("available"):
+        chg = price.get("rows", {}).get("latest", {}).get("chg_pct")
+        if chg is not None and chg <= -30:
+            score += 1
+            reasons.append(f"\u4e8b\u4ef6\u5f8c\u80a1\u50f9\u7d2f\u8dcc {abs(chg):.0f}%\uff0c\u7559\u610f\u6d17\u5009\u6d3e\u8ca8\u98a8\u96aa")
+    if not reasons:
+        reasons.append("\u672a\u898b\u660e\u986f\u7570\u52d5\u8a0a\u865f")
+    if status in ("withdrawn", "lapsed"):
+        level = "low"
+    elif score >= 4:
+        level = "high"
+    elif score >= 2:
+        level = "mid"
+    else:
+        level = "low"
+    label, action = WATCH_LEVELS[level]
+    return {"level": level, "label": label, "score": score, "reasons": reasons, "action": action}
+
+
 def analyze(stock: str, event_date: str, event_type: str | None = None) -> dict:
     code = cs.pad_code(stock)
     ev = _find_event(code, event_date, event_type)
@@ -311,6 +385,8 @@ def analyze(stock: str, event_date: str, event_type: str | None = None) -> dict:
     elif conc.get("note"):
         impact_points.append(conc["note"])
 
+    watch = _watch_verdict(code, ev, conc, dilution, price, status)
+
     return {
         "stock_code": code,
         "stock_name": _quotes().get("names", {}).get(code, ""),
@@ -332,6 +408,7 @@ def analyze(stock: str, event_date: str, event_type: str | None = None) -> dict:
             "points": [p for p in impact_points if p],
             "issued_shares": issued,
         },
+        "watch": watch,
         "positions": {
             "window": [conc.get("before", {}).get("date", ""), conc.get("after", {}).get("date", "")] if conc.get("available") else [],
             "accumulators": conc.get("accumulators", []),

@@ -93,6 +93,7 @@ python3 position_tracker.py 01241 2025-09-18 2026-09-16 --points 24   # 輸出 J
 - API：zo.space `/api/corpaction-analysis?stock=&date=&type=`（Bun.spawn python、10 分鐘 cache、single-flight、30 req/min、25s timeout，pattern 同 `/api/position-track` 一樣）
 - 前端：`/stock-analysis` 財技動作 tab 全市場 list，撳卡展開 `CorpAnalysisPanel` 四段（1 動作解釋／2 事後有無歸邊／3 影響／4 事後倉位變化）＋「開啟 CCASS 完整分析」掣；同一件唔會重覆計
 - 事件太新（事後無新持倉變動日）會照出解釋＋影響，歸邊段顯示「事件太新」note，唔係報錯
+- **重點監察提示 watch（2026-09-19 加）**：`watch` 欄 = 監察分（0-10+）＋ label（⭐ 重點監察／🟡 值得留意／暫無需重點監察）＋ reasons[] ＋ action。計分：事件進行中+2、明顯歸邊+2（輕度+1）、單一券商窗口收貨≥1pp+2（≥0.5pp+1）、攤薄新股≥30%+2（≥10%+1）、事後股價跌≥30%+1、±180日串聯多宗攤薄型財技+2、已撤回/失效−3。score≥4=high、≥2=mid。前端 CorpAnalysisPanel 頂部紅／黃 banner 顯示
 
 
 ## 資料覆蓋
