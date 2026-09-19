@@ -253,9 +253,9 @@ def _concentration_and_positions(code: str, event_date: str) -> dict:
 
 
 WATCH_LEVELS = {
-    "high": ("\u2b50 \u91cd\u9ede\u76e3\u5bdf", "\u5efa\u8b70\u52a0\u5165\u91cd\u9ede\u76e3\u5bdf\uff1a\u8ffd\u8e64\u4e8b\u4ef6\u5b8c\u6210\u9032\u5ea6\u3001\u4e8b\u5f8c CCASS \u6301\u5009\u8b8a\u5316\u3001\u5927\u984d\u6536\u8ca8\u5238\u5546\u53ca\u6709\u7121\u9023\u7e8c\u8ca1\u6280\u52d5\u4f5c\u3002"),
-    "mid": ("\ud83d\udc41 \u503c\u5f97\u7559\u610f", "\u53ef\u52a0\u5165\u89c0\u5bdf\u540d\u55ae\uff0c\u6bcf\u9031\u8907\u67e5\u4e00\u6b21\u6301\u5009\u8207\u80a1\u50f9\u8b8a\u5316\u3002"),
-    "low": ("\u66ab\u7121\u9700\u91cd\u9ede\u76e3\u5bdf", "\u76ee\u524d\u8a0a\u865f\u4e0d\u5f37\uff0c\u6b63\u5e38\u89c0\u5bdf\u5373\u53ef\uff1b\u82e5\u5f8c\u7e8c\u6709\u65b0\u516c\u544a\u6216\u6301\u5009\u7570\u52d5\u518d\u91cd\u65b0\u8a55\u4f30\u3002"),
+    "high": ("⭐ 重點監察", "建議加入重點監察：追蹤事件完成進度、事後 CCASS 持倉變化、大額收貨券商及有無連續財技動作。"),
+    "mid": ("🟡 值得留意", "可加入觀察名單，每週複查一次持倉與股價變化。"),
+    "low": ("暫無需重點監察", "目前訊號不強，正常觀察即可；若後續有新公告或持倉異動再重新評估。"),
 }
 
 
@@ -418,13 +418,24 @@ def analyze(stock: str, event_date: str, event_type: str | None = None) -> dict:
     }
 
 
+def _desurrogate(o):
+    if isinstance(o, str):
+        return o.encode("utf-16", "surrogatepass").decode("utf-16", "ignore")
+    if isinstance(o, dict):
+        return {k: _desurrogate(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_desurrogate(v) for v in o]
+    return o
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("stock")
     parser.add_argument("event_date")
     parser.add_argument("--type", default=None)
     args = parser.parse_args()
-    print(json.dumps(analyze(args.stock, args.event_date, args.type), ensure_ascii=False, default=str))
+    result = _desurrogate(analyze(args.stock, args.event_date, args.type))
+    print(json.dumps(result, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":
