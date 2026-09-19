@@ -85,6 +85,16 @@ python3 position_tracker.py 01241 2025-09-18 2026-09-16 --points 24   # 輸出 J
 - 開始日唔係有效變動日時，回傳 `effective_from`（實際採用嘅基準日），UI 以顯示日期為準
 - 詳情同限制見 `POSITION_TRACKING.md`；驗證案例 01241（30 收貨／24 派貨參與者）
 
+## 財技動作逐件深度分析 corpaction_analysis.py（2026-09-19 新增）
+
+用戶要求「財技動作」list 唔好淨係列事件，每件要有：①動作解釋／簡介、②事後有無歸邊、③影響、④完成後邊幾個倉位有變化。
+
+- `corpaction_analysis.py <stock> <event_date> [--type <type>]` → JSON：`explain`（類型通用解釋＋呢單嘅比例/價格/除權日/狀態）、`concentration`（事件日 vs 事件日+90日（cap 到 coverage 尾）兩個 CCASS snapshot 嘅 top5/10/20 對比＋歸邊判定：Δtop10 ≥+5pp 明顯歸邊／≥+2 輕度／≤−2 分散）、`impact`（供股/配售/CB 按 ratio 計攤薄：1供2＝股數×3、新股佔 66.7%；股價 T-1/+5/+20/最新 變化，用 `imported/quotes.json`）、`positions`（同窗口內收貨／派貨排行 top8，forward-fill 重建）
+- API：zo.space `/api/corpaction-analysis?stock=&date=&type=`（Bun.spawn python、10 分鐘 cache、single-flight、30 req/min、25s timeout，pattern 同 `/api/position-track` 一樣）
+- 前端：`/stock-analysis` 財技動作 tab 全市場 list，撳卡展開 `CorpAnalysisPanel` 四段（1 動作解釋／2 事後有無歸邊／3 影響／4 事後倉位變化）＋「開啟 CCASS 完整分析」掣；同一件唔會重覆計
+- 事件太新（事後無新持倉變動日）會照出解釋＋影響，歸邊段顯示「事件太新」note，唔係報錯
+
+
 ## 資料覆蓋
 
 - 本地 change-log：2023-01-03 → 2026-07-31
