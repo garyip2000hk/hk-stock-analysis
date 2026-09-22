@@ -173,6 +173,21 @@ def is_friday():
     return now_hkt().weekday() == 4
 
 
+
+def vix_advisory() -> dict:
+    """IB VIX 環境分級（cross_market），做 strangle 顧問訊號。"""
+    try:
+        import cross_market
+        v = cross_market.load_ib().get("VIX")
+        if v is None or not len(v):
+            return cross_market.vix_regime(None)
+        out = cross_market.vix_regime(float(v.close.iloc[-1]))
+        out["asof"] = str(v.date.iloc[-1])
+        return out
+    except Exception as e:
+        return {"level": None, "regime": "unknown", "note": f"VIX 載入失敗: {e}"}
+
+
 def run():
     ctx = connect()
     try:
@@ -201,6 +216,7 @@ def run():
             "strikes": strikes,
             "atm_iv": atm_iv(chain, hsi) if (chain is not None and hsi) else None,
             "contracts": {},
+            "vix_regime": vix_advisory(),
             "note": "",
         }
 

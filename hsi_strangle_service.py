@@ -32,11 +32,12 @@ import math
 import pandas as pd
 
 import futu
-from futu import OpenSecTradeContext, SecurityFirm, TrdEnv, TrdSide, OrderType, RET_OK
+from futu import OpenFutureTradeContext, SecurityFirm, TrdEnv, TrdSide, OrderType, TimeInForce, RET_OK
 from futu import IndexOptionType
 
 import hsi_strangle as hs
 import bs as bsx
+import cross_market as cmx
 
 OPEND_HOST = os.environ.get("OPEND_HOST", "127.0.0.1")
 OPEND_PORT = int(os.environ.get("OPEND_PORT", "11111"))
@@ -113,7 +114,8 @@ def trade_ctx():
     global _trade_ctx
     with _trade_lock:
         if _trade_ctx is None:
-            _trade_ctx = OpenSecTradeContext(host=OPEND_HOST, port=OPEND_PORT, security_firm=SecurityFirm.FUTUSECURITIES)
+            # HSI/MHI 指數期權屬期貨市場：必須用期貨交易通道（證券通道落單會被拒）
+            _trade_ctx = OpenFutureTradeContext(host=OPEND_HOST, port=OPEND_PORT, security_firm=SecurityFirm.FUTUSECURITIES)
         return _trade_ctx
 
 
@@ -160,10 +162,10 @@ def real_account():
         if (str(r.get("trd_env", "")).upper() == "REAL"
                 and str(r.get("acc_type", "")).upper() == "MARGIN"
                 and str(r.get("acc_status", "")).upper() == "ACTIVE"):
-            return str(r["acc_id"])
+            return int(r["acc_id"])
     for _, r in df.iterrows():
         if str(r.get("trd_env", "")).upper() == "REAL" and str(r.get("acc_status", "")).upper() == "ACTIVE":
-            return str(r["acc_id"])
+            return int(r["acc_id"])
     raise RuntimeError("冇 ACTIVE 嘅 REAL 戶口")
 
 
@@ -462,8 +464,18 @@ def compute_full_signal(force=False):
                 pass
         if mhi:
             daily["mhi_opt"] = mhi
+    ovn = None
+    try:
+        ovn = cmx.overnight_live()
+    except Exception:
+        ovn = {"ok": False, "error": "cross_market 不可用"}
+    cms = None
+    try:
+        cms = cmx.summary()
+    except Exception:
+        cms = None
     return {"time": _now_iso(), "vhsi": daily.get("vhsi"), "hsi": daily.get("hsi"),
-            "daily": daily, "weekly": weekly}
+            "daily": daily, "weekly": weekly, "overnight": ovn, "cross_market": cms}
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +495,79 @@ def place_real_order(code, qty, side, price):
         trd_side=TrdSide.SELL if side == "SELL" else TrdSide.BUY,
         order_type=OrderType.NORMAL, trd_env=TrdEnv.REAL,
         acc_id=acc, remark="hsi-strangle",
+    )
+    if ret != RET_OK:
+        return {"success": False, "error": str(data)}
+    oid = None
+    try:
+        oid = str(data["orderid"].iloc[0])
+    except Exception:
+        oid = str(data)
+    return {"success": True, "order_id": oid}
+
+
+def quote_view(code):
+    code = (code or "").strip().upper()
+    if code and "." not in code:
+        code = ("HK." + code.zfill(5)) if code.isdigit() else code
+    if not code:
+        return {"error": "missing code"}
+    ctx = quote_ctx()
+    try:
+        ret, data = ctx.get_market_snapshot([code])
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+    if ret != RET_OK or data is None or len(data) == 0:
+        return {"error": f"snapshot 失敗: {data}"}
+    r = data.iloc[0]
+
+    def fnum(k):
+        try:
+            v = float(r.get(k))
+            return None if v != v else v
+        except Exception:
+            return None
+
+    last, prev = fnum("last_price"), fnum("prev_close_price")
+    chg = (last - prev) if (last is not None and prev) else None
+    chg_pct = round(chg / prev * 100, 3) if (chg is not None and prev) else None
+    return {
+        "code": code,
+        "name": str(r.get("name") or code),
+        "lastPrice": last,
+        "openPrice": fnum("open_price"),
+        "highPrice": fnum("high_price"),
+        "lowPrice": fnum("low_price"),
+        "prevClose": prev,
+        "changeVal": chg,
+        "changeRate": chg_pct,
+        "volume": fnum("volume"),
+        "turnover": fnum("turnover"),
+    }
+
+
+def stock_order(body):
+    code = str(body.get("code") or "").strip().upper()
+    qty = float(body.get("qty") or 0)
+    side = str(body.get("trdSide") or "").upper()
+    if not code or qty <= 0 or side not in ("BUY", "SELL"):
+        return {"success": False, "error": "參數不全（code/qty/trdSide）"}
+    if not body.get("confirm"):
+        return {"success": False, "error": "需要 confirm=true"}
+    otype = str(body.get("orderType") or "NORMAL").upper()
+    tif = str(body.get("timeInForce") or "DAY").upper()
+    price = float(body.get("price") or 0)
+    ensure_unlocked()
+    acc = real_account()
+    ret, data = trade_ctx().place_order(
+        price=price if otype != "MARKET" else 0, qty=qty, code=code,
+        trd_side=TrdSide.SELL if side == "SELL" else TrdSide.BUY,
+        order_type=getattr(OrderType, otype, OrderType.NORMAL),
+        time_in_force=getattr(TimeInForce, tif, TimeInForce.DAY),
+        trd_env=TrdEnv.REAL, acc_id=acc, remark="ext-trade",
     )
     if ret != RET_OK:
         return {"success": False, "error": str(data)}
@@ -650,7 +735,50 @@ def positions_view():
     return {"positions": out, "hsi_now": round(hsi_now, 2) if hsi_now is not None else None}
 
 
-def monitor_view():
+def _demo_positions(hsi, vhsi):
+    """Demo 模式：模擬兩倉（一持有、一止賺）俾 extension 體驗流程，唔會真落盤。"""
+    import math
+    hsi = float(hsi or 25700.0)
+    vhsi = float(vhsi or 19.0)
+    today = hs.now_hkt().date()
+    em5 = hsi * (vhsi / 100) / math.sqrt(252) * math.sqrt(5)
+    K = int(round((hsi + 450) / 200) * 200)
+    L = int(round((hsi - 450) / 200) * 200)
+    prem_a = max(80.0, round(em5 * 0.5))
+    cur_a = round(prem_a * 0.68)
+    K2 = int(round((hsi + 200) / 200) * 200)
+    L2 = int(round((hsi - 250) / 200) * 200)
+    prem_b = max(40.0, round(em5 * 0.25))
+    cur_b = round(prem_b * 0.45)
+
+    def mk(pid, ver, Kk, Ll, prem, cur, dleft, status, reason, hsi_open):
+        pnl_pts = round(prem - cur, 1)
+        return {
+            "id": pid, "mode": "Full", "mode_label": "Full Strangle", "version": ver,
+            "instrument": "HSI", "mult": 50, "real": False, "demo": True,
+            "legs": [{"cp": "CALL", "strike": Kk}, {"cp": "PUT", "strike": Ll}],
+            "lots": 1,
+            "entry_date": (today - timedelta(days=2)).strftime("%Y-%m-%d"),
+            "expiry": (today + timedelta(days=dleft)).strftime("%Y-%m-%d"),
+            "days_left": dleft, "premium_pts": prem,
+            "premium_hkd": round(prem * 50, 0),
+            "hsi_at_open": hsi_open, "vhsi_at_open": round(vhsi + 1.2, 2),
+            "hsi_now": round(hsi, 2),
+            "live_pnl_hkd": round(pnl_pts * 50, 0),
+            "pnl_pct": round(pnl_pts / prem * 100, 1),
+            "live_winprob": _bs_winprob(hsi, vhsi, dleft, Kk, Ll, "Full"),
+            "entry_winprob": _bs_winprob(hsi_open, vhsi + 1.2, dleft + 2, Kk, Ll, "Full"),
+            "tp_sl_status": status, "suggest_reason": reason, "status": "OPEN",
+        }
+    return [
+        mk("demo-hold", "daily", K, L, prem_a, cur_a, 4,
+           "HOLD", "Demo 倉：帶內持有中（模擬數據，非真實持倉）", round(hsi - 60, 2)),
+        mk("demo-tp", "weekly", K2, L2, prem_b, cur_b, 1,
+           "TAKE_PROFIT", "Demo 倉：權金回縮至 45%，到止賺線，可撳一鍵平倉體驗流程", round(hsi + 40, 2)),
+    ]
+
+
+def monitor_view(demo=False):
     """Extension 實時監察 payload：持倉 + 即市勝率 + 止賺/止蝕狀態。"""
     pv = positions_view()
     hsi_now = pv.get("hsi_now")
@@ -688,11 +816,15 @@ def monitor_view():
             entry = None
         p["entry_winprob"] = entry
         p["tp_sl_status"] = status_map.get(p.get("suggest"), "HOLD")
+    positions = pv["positions"]
+    if demo:
+        positions = positions + _demo_positions(hsi_now, vhsi_now)
     return {
         "time": _now_iso(),
         "hsi_now": hsi_now,
         "vhsi_now": vhsi_now,
-        "positions": pv["positions"],
+        "positions": positions,
+        "demo": bool(demo),
     }
 
 
@@ -958,14 +1090,19 @@ def auto_tick(open_new):
                                  "premium_pts": res["position"]["premium_pts"], "instrument": inst}
             else:
                 out["open_error"] = res.get("error")
-        # 週版全自動開倉（週一/二、VHSI≥20、本週未開）
+    # 週版批准制：面板批准咗（pending.approved）就喺週一/週首交易日出盤，
+    # 唔受 auto_mode 限制（批准本身已係用戶明確同意）。
+    if open_new:
         wpos = auto_open_weekly(st, cfg)
         if wpos:
-            save_state(st)
-            out["opened_weekly"] = {"id": wpos["id"],
-                                    "K": next((l["strike"] for l in wpos["legs"] if l["cp"] == "CALL"), None),
-                                    "L": next((l["strike"] for l in wpos["legs"] if l["cp"] == "PUT"), None),
-                                    "premium_pts": wpos["premium_pts"]}
+            if wpos.get("weekly_open_error"):
+                out["weekly_open_error"] = wpos["weekly_open_error"]
+            else:
+                save_state(st)
+                out["opened_weekly"] = {"id": wpos["id"],
+                                        "K": next((l["strike"] for l in wpos["legs"] if l["cp"] == "CALL"), None),
+                                        "L": next((l["strike"] for l in wpos["legs"] if l["cp"] == "PUT"), None),
+                                        "premium_pts": wpos["premium_pts"]}
     return out
 
 
@@ -1082,10 +1219,16 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, {"pending": pending_weekly_view()})
             if p == "/signal/full":
                 return _json(self, compute_full_signal(force=parse_qs(urlparse(self.path).query).get("force",[""])[0]=="1"))
+            if p == "/overnight":
+                return _json(self, cmx.overnight_live())
             if p == "/positions":
                 return _json(self, positions_view())
             if p == "/monitor":
-                return _json(self, monitor_view())
+                q = parse_qs(urlparse(self.path).query)
+                return _json(self, monitor_view(q.get("demo", [""])[0] == "1"))
+            if p == "/quote":
+                q = parse_qs(urlparse(self.path).query)
+                return _json(self, quote_view(q.get("code", [""])[0]))
             if p == "/track":
                 return _json(self, track_view())
             if p == "/history":
@@ -1191,6 +1334,9 @@ class Handler(BaseHTTPRequestHandler):
                 pos["closed_at"] = _now_iso()
                 save_state(st)
                 return _json(self, {"success": True, "position": pos})
+            if p == "/stock-order":
+                res = stock_order(body)
+                return _json(self, res, 200 if res.get("success") else 400)
             return _json(self, {"error": "not found"}, 404)
         except Exception as e:
             traceback.print_exc()

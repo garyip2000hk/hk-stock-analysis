@@ -97,6 +97,56 @@ def ensure_unlocked():
         raise RuntimeError(f"解鎖交易失敗: {data}")
     _unlocked["REAL"] = True
 
+# --------------- 期貨交易通道（MHI/HSI 指數期權）
+_fut_trade_ctx = None
+
+
+def fut_trade_ctx():
+    global _fut_trade_ctx
+    from futu import OpenFutureTradeContext, SecurityFirm
+    with _trade_lock:
+        if _fut_trade_ctx is None:
+            _fut_trade_ctx = OpenFutureTradeContext(
+                host=OPEND_HOST, port=OPEND_PORT,
+                security_firm=SecurityFirm.FUTUSECURITIES)
+        return _fut_trade_ctx
+
+
+def real_account_futures() -> int:
+    """指數期權（MHI/HSI）必須經期貨通道 + 期貨保證金戶口。"""
+    from futu import RET_OK
+    ret, df = fut_trade_ctx().get_acc_list()
+    if ret != RET_OK:
+        raise RuntimeError(f"攞唔到期貨戶口: {df}")
+    for _, r in df.iterrows():
+        if (str(r.get("trd_env", "")).upper() == "REAL"
+                and str(r.get("acc_type", "")).upper() == "MARGIN"
+                and str(r.get("acc_status", "")).upper() == "ACTIVE"):
+            return int(r["acc_id"])
+    for _, r in df.iterrows():
+        if (str(r.get("trd_env", "")).upper() == "REAL"
+                and str(r.get("acc_status", "")).upper() == "ACTIVE"):
+            return int(r["acc_id"])
+    raise RuntimeError("冇 ACTIVE 嘅 REAL 期貨戶口")
+
+
+def _is_index_option(pos: dict) -> bool:
+    """持倉係咪指數期權（需要期貨通道）。"""
+    if pos.get("market") == "hk_index" or pos.get("channel") == "fut":
+        return True
+    for l in (pos.get("legs") or []):
+        code = str(l.get("futu_code") or "")
+        if re.match(r"HK\.(MHI|HSI)\d{6}[CP]", code):
+            return True
+    return False
+
+
+def _close_ctx_and_acc(pos: dict):
+    """按持倉類型揀啱嘅交易通道同戶口。"""
+    if _is_index_option(pos):
+        return fut_trade_ctx(), real_account_futures()
+    return trade_ctx(), int(real_account())
+
 
 def real_account() -> str:
     """賣期權要保證金戶口（naked short 唔可以用 CASH），優先 MARGIN。"""
@@ -371,8 +421,7 @@ def close_position(pid: str, reason: str, auto: bool) -> dict:
         return {"ok": True, "mode": "paper", "pnl_hkd": mk["pnl_hkd"], "reason": reason}
 
     ensure_unlocked()
-    acc = real_account()
-    ctx = trade_ctx()
+    ctx, acc = _close_ctx_and_acc(pos)
     results = []
     for i, l in enumerate(pos["legs"]):
         if i:

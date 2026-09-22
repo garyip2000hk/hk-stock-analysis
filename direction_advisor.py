@@ -24,6 +24,7 @@ import bs
 import iv_analyzer
 import market_chains as mc
 import options_chain as oc
+import regime_edge as re_edge
 import strategy_engine as se
 
 sys.path.insert(0, str(se.BASE.parent / "auto-trading"))
@@ -133,16 +134,118 @@ BUILDERS = {"up": _candidates_up, "flat": _candidates_flat, "down": _candidates_
 
 
 # ---------------------------------------------------------------- 評分
-def score_strategy(ev_res: dict) -> float:
-    """綜合分：勝率＋期望值／風險比，無限風險重罰。"""
-    wr = (ev_res["win_rate"] - 50.0) / 10.0          # 每 10 個百分點 1 分
-    if ev_res["unlimited_risk"]:
-        risk_pts = -3.0
-    else:
-        risk_base = abs(ev_res["max_loss"] or 0) or abs(ev_res["net_cost_hkd"]) or 1.0
-        risk_pts = max(-3.0, min(3.0, (ev_res["ev_hkd"] or 0) / risk_base * 10))
-    ev_pts = 1.5 if (ev_res["ev_hkd"] or 0) > 0 else -1.5
-    return round(wr + risk_pts + ev_pts, 2)
+def score_strategy(ev_res: dict, emp: dict | None = None) -> float:
+    """綜合分：**期望值主導**，勝率只做次要加分。
+
+    舊版係「勝率＋EV/風險比」，令 76% 勝率但期望值 −$720 嘅組合排第一。
+    賣方策略天生高勝率低期望，只睇勝率會系統性揀中「贏多次細錢、
+    輸一次大錢」嘅組合。新版：
+
+      · EV/風險 佔 ±6 分（主）
+      · 勝率     佔 ±1.5 分（次）
+      · 真實歷史期望值（regime_edge）三個口徑齊正 +2、有負 −2
+      · 公式期望值 ≤ 0 → −4（硬性排到後面）
+      · 無限風險 −3
+    """
+    risk_base = (abs(ev_res.get("max_loss") or 0)
+                 or abs(ev_res.get("net_cost_hkd") or 0) or 1.0)
+    ev = ev_res.get("ev_hkd") or 0
+    ev_pts = max(-6.0, min(6.0, ev / risk_base * 20))
+    wr_pts = max(-1.5, min(1.5, (ev_res["win_rate"] - 50.0) / 20.0))
+    pts = ev_pts + wr_pts
+    if ev <= 0:
+        pts -= 4.0
+    if ev_res.get("unlimited_risk"):
+        pts -= 3.0
+    if emp and emp.get("ok"):
+        if emp.get("all_positive"):
+            pts += 2.0
+        elif emp.get("ev_worst_case") is not None and emp["ev_worst_case"] < 0:
+            pts -= 2.0
+    return round(pts, 2)
+
+
+def _headline(results: list[dict], reg: dict, dir_label: str) -> str:
+    """整頁一句總結：呢個方向今日有冇值得做嘅買法。"""
+    if not results:
+        return "期權鏈太薄，砌唔到可靠組合。"
+    clean = [r for r in results if r["verdict"]["level"] == "ok"]
+    warn = [r for r in results if r["verdict"]["level"] == "warn"]
+    if clean:
+        b = clean[0]
+        return (f"{dir_label}：{len(clean)}/{len(results)} 個組合三道閘全過，"
+                f"最好係「{b['strategy']}」期望值 {b['ev_hkd']:+,.0f}、"
+                f"勝率 {b['win_rate']}%。")
+    if warn:
+        b = warn[0]
+        n_reasons = len(b["verdict"]["blocks"])
+        return (f"{dir_label}：{len(results)} 個組合**冇一個乾淨過閘**。"
+                f"最接近係「{b['strategy']}」（公式期望值 {b['ev_hkd']:+,.0f}、"
+                f"勝率 {b['win_rate']}%），但仲有 {n_reasons} 個保留："
+                f"{b['verdict']['blocks'][0]}。要做就減注。")
+    note = reg.get("note", "") if reg.get("ok") else ""
+    return (f"{dir_label}：今日 {len(results)} 個組合**全部負期望值**，"
+            f"建議唔做（或改方向／等波幅變）。{note}")
+
+
+def _real_ev_brief(emp: dict | None) -> dict | None:
+    """真實歷史期望值精簡版（俾前端／extension 顯示）。"""
+    if not emp or not emp.get("ok"):
+        return None
+    out = {"h_days": emp.get("horizon_trading_days"),
+           "all_positive": emp.get("all_positive"),
+           "ev_worst": emp.get("ev_worst_case"),
+           "ev_mean": emp.get("ev_mean")}
+    for k in ("y1", "y5", "all", "same_regime"):
+        v = emp.get(k)
+        if v:
+            out[k] = {"ev": v.get("ev"), "win_rate": v.get("win_rate"),
+                      "worst": v.get("worst"), "n": v.get("n")}
+    return out
+
+
+def _verdict(r: dict, reg: dict) -> dict:
+    """一句人話結論：值唔值得做，唔值得就講明係邊道閘擋。
+
+    三道閘：
+      gate_ev     公式期望值 ≤ 0（收得嘅權金補唔返風險）
+      gate_real   真實歷史重採樣有任何口徑負期望
+      gate_regime 波幅體制同策略方向相反（低波幅位賣方／高波幅位買方）
+    """
+    ev = r.get("ev_hkd") or 0
+    real = r.get("real_ev")
+    is_credit = (r.get("net_cost_hkd") or 0) < 0     # 收權金 = 賣方
+    blocks: list[str] = []
+
+    if ev <= 0:
+        risk = abs(r.get("max_loss") or 0)
+        got = abs(r.get("net_cost_hkd") or 0)
+        if is_credit:
+            blocks.append(f"公式期望值 {ev:+,.0f}（≤0）：勝率 {r['win_rate']}%，"
+                          f"但贏只收 ${got:,.0f}、輸就蝕 ${risk:,.0f}，長線補唔返")
+        else:
+            blocks.append(f"公式期望值 {ev:+,.0f}（≤0）：要付 ${got:,.0f} 權金，"
+                          f"但只有 {r['win_rate']}% 機會賺，長線補唔返")
+    if real and not real.get("all_positive"):
+        worst = real.get("ev_worst")
+        if worst is not None and worst < 0:
+            blocks.append(f"真實歷史重採樣最差口徑期望值 {worst:+,.0f}")
+    if reg.get("ok"):
+        if reg["label"] == "low" and is_credit:
+            blocks.append(f"波幅低位（HV20 {reg['hv20']}%，5 年百分位 "
+                          f"{reg.get('pct_ref')}%）賣方冇溢價")
+        elif reg["label"] == "high" and not is_credit:
+            blocks.append(f"波幅高位（HV20 {reg['hv20']}%，5 年百分位 "
+                          f"{reg.get('pct_ref')}%）買方要付貴價")
+
+    if not blocks:
+        return {"tradeable": True, "level": "ok",
+                "text": f"期望值 {ev:+,.0f}、勝率 {r['win_rate']}%，三道閘全過。",
+                "blocks": []}
+    level = "block" if ev <= 0 else "warn"
+    lead = "唔建議做" if level == "block" else "可做但有保留"
+    return {"tradeable": level != "block", "level": level,
+            "text": f"{lead}：" + "；".join(blocks), "blocks": blocks}
 
 
 # ---------------------------------------------------------------- 主流程
@@ -221,6 +324,15 @@ def advise(code: str, direction: str, as_of: str | None = None,
         ctx["note"] = ""
     ctx.setdefault("codes_from_chain", market != "hk_stock")
 
+    hist: list[tuple[str, float]] = []
+    reg: dict = {"ok": False}
+    try:
+        hist = re_edge.history(market, code)
+        if hist:
+            reg = re_edge.regime(market, code, atm_iv, rows=hist)
+    except Exception:
+        hist, reg = [], {"ok": False}
+
     results: list[dict] = []
     for exp in ctx["exps"]:
         df = ctx["chain"](exp["expiry"])
@@ -243,7 +355,15 @@ def advise(code: str, direction: str, as_of: str | None = None,
             elif cmap:
                 for lg in legs:
                     lg["futu_code"] = cmap.get((lg["cp"], float(lg["strike"])))
-            sc = score_strategy(ev_res)
+            emp = None
+            if hist:
+                try:
+                    emp = re_edge.empirical_ev(
+                        legs, spot, size, int(exp["dte"]), market, code,
+                        rows=hist, reg=reg)
+                except Exception:
+                    emp = None
+            sc = score_strategy(ev_res, emp)
             results.append({
                 "strategy": name,
                 "logic": logic,
@@ -253,9 +373,12 @@ def advise(code: str, direction: str, as_of: str | None = None,
                 "legs": legs,
                 **ev_res,
                 "score": sc,
+                "real_ev": _real_ev_brief(emp),
             })
 
     results.sort(key=lambda r: (-r["score"], -(r["ev_hkd"] or 0)))
+    for r in results:
+        r["verdict"] = _verdict(r, reg)
     best = results[0] if results else None
     out = {
         "ok": bool(results),
@@ -282,6 +405,12 @@ def advise(code: str, direction: str, as_of: str | None = None,
         "best": best,
         "alternatives": results[1:top],
         "n_candidates": len(results),
+        "regime": reg if reg.get("ok") else None,
+        "tradeable_count": sum(1 for r in results
+                               if r["verdict"]["level"] == "ok"),
+        "warn_count": sum(1 for r in results
+                          if r["verdict"]["level"] == "warn"),
+        "headline": _headline(results, reg, DIR_LABEL[direction]),
     }
     if market == "hk_index":
         out["instrument"] = ctx["instrument"]
