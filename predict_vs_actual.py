@@ -23,6 +23,7 @@ import sys
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 SHEET_ID = "1dS9G5GSoq7Ue-Ni00lOXam37cR-Z8bMrMWP2ysUUCXA"
 KLINE = Path("/home/workspace/Desktop/db/Futu/Kline/kline_index.parquet")
@@ -326,8 +327,69 @@ def main():
         for os_ in col.values():
             max_os = max(max_os, os_)
 
+    # ── 跨市場訊號（隔夜美股／期貨 → 恒指開市方向參考）──
+    try:
+        import cross_market as _cm
+        _cmp = _cm.build()
+        cross = {
+            "latest": _cmp["latest"],
+            "vix_regime": _cmp["vix_regime"],
+            "stats": _cmp["stats"],
+            "series": _cmp["series"][-60:],
+        }
+    except Exception as e:
+        print(f"WARN cross_market: {e}", file=sys.stderr)
+        cross = None
+
+    # ── 跨市場訊號（隔夜美股／期貨 → 恒指開市參考）──
+    cm_block = None
+    try:
+        cm_path = Path(__file__).parent / "options_data" / "cross_market.json"
+        cm = json.loads(cm_path.read_text())
+        cm_series = cm.get("series", [])
+        stats = cm.get("stats", {})
+        vr = cm.get("vix_regime", {})
+        vx_now = vr.get("level")
+        # 訊號對「下一交易日」：最新已驗證行 + 未配對嘅最新美股晚
+        sig = None
+        if cm_series:
+            last = cm_series[-1]
+            sig = {
+                "us_date": last["us_date"],
+                "spx": last["spx"], "ndx": last["ndx"],
+                "es": last.get("es"), "nq": last.get("nq"),
+                "vix": last.get("vix"), "vix_chg": last.get("vix_chg"),
+                "dir": last["dir"], "strong": last["strong"],
+                "hsi_date": last["d"], "hsi_chg": last.get("hsi_chg"),
+                "hit_dir": last.get("hit_dir"), "validated": last.get("hit_dir") is not None,
+            }
+        # 下一交易日（未驗證）
+        nxt = dict(sig or {})
+        nxt["validated"] = False
+        nxt["hsi_date"] = None
+        nxt["hsi_chg"] = None
+        nxt["hit_dir"] = None
+        cm_block = {
+            "signal": sig,
+            "next_day": nxt,
+            "vix_level": vx_now,
+            "vix_regime": vr.get("regime"),
+            "vix_note": vr.get("note"),
+            "stats": {
+                "dir_n": stats.get("dir", {}).get("n"),
+                "dir_pct": stats.get("dir", {}).get("pct"),
+                "strong_n": stats.get("strong", {}).get("n"),
+                "strong_pct": stats.get("strong", {}).get("pct"),
+                "buckets": stats.get("buckets", []),
+            },
+            "series_tail": cm_series[-30:],
+        }
+    except Exception as e:
+        print(f"WARN cross_market: {e}", file=sys.stderr)
+
     payload = {
-        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated": datetime.now(ZoneInfo("Asia/Hong_Kong")).strftime("%Y-%m-%d %H:%M:%S"),
+        "cross_market": cross,
         "range": {"start": series[0]["d"], "end": series[-1]["d"], "days": n},
         "horizons": [{"key": k, "label": lb} for k, lb, _ in HORIZONS],
         "series": series,
@@ -335,6 +397,7 @@ def main():
         "max_os": max_os,
         "stats": {"radar": radar_stats, "cluster": cl_stats},
         "radar": radar,
+        "cross_market": cm_block,
     }
 
     js = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

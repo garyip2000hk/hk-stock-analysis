@@ -38,6 +38,9 @@ CCASS_DIR = DATA_ROOT / "CCASS"
 OUT = IMPORTED / "quotes.json"
 
 MAX_EQUITY_CODE = 9999
+# 一個正常交易日有 2,600+ 隻普通股；少過呢個數嘅「日」一定係壞檔
+# （stub HTM / 解析失敗），要跳過俾 parquet 後備補，唔好寫入 quotes.json
+MIN_DAY_ROWS = 500
 
 ROW1 = re.compile(
     r"^[\*#\s]{0,3}\s*(\d{1,5})\s+(\S.{0,22}?)\s{2,}([A-Z]{3})"
@@ -138,6 +141,9 @@ def collect_htm() -> tuple[dict, dict, int]:
             continue
         if not dt or not rows:
             continue
+        if len(rows) < MIN_DAY_ROWS:
+            print(f"  [skip] {f.name} ({dt}): 只有 {len(rows)} 行，疑似壞檔，棄用", file=sys.stderr)
+            continue
         day = quotes.setdefault(dt, {})
         for code, rec in rows.items():
             names[code] = rec.pop("name")
@@ -215,6 +221,10 @@ def main() -> int:
 
     quotes = {**q_htm, **q_pq}
     names = {**n_pq, **n_htm}
+    # 最後防線：任何來源太薄嘅日一律棄掉（寧願冇嗰日，唔好得 8 隻股嘅假日）
+    for d in [d for d, rows_ in quotes.items() if len(rows_) < MIN_DAY_ROWS]:
+        print(f"  [drop] {d}: 只有 {len(quotes[d])} 行，棄用", file=sys.stderr)
+        quotes.pop(d)
     if not quotes:
         print("冇任何報價資料，中止", file=sys.stderr)
         return 1

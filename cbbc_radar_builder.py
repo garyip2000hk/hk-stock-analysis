@@ -432,7 +432,10 @@ def build_day(ctx, trading_date, prediction_date=None):
     # 「後」：DayRange =（昨日 High−Low）/2（日 K 攞唔到就後備 EM）；上下各 3 個最近 200 點格，
     # 可達先計入；相對期指張數 upSum − downSum ±500 定屠熊／殺牛／窄幅。
     premarket = previous_night_premarket(ctx, trading_date, prediction_date or trading_date, close)
-    day_range = (high - low) / 2 if (high and low and high > low) else em1d
+    # 「後」可達半徑用 EM（今日預期 1σ 波幅，前瞻），唔再用（昨日 High−Low）/2：
+    # 低波幅日 half-range 會過窄（例 09-08 half=151 vs EM=274），令最近牛熊區全被當「不可達」
+    # → 上/下張數都 0 → 誤判窄幅（用戶 2026-09-08 指正）。
+    day_range = em1d
     sheet_back = _sheet_back_direction(snap, close, day_range)
     back = sheet_back["label"]
     log(f"sheet 後向: up {sheet_back['upSum']:.0f} vs down {sheet_back['downSum']:.0f} "
@@ -447,19 +450,7 @@ def build_day(ctx, trading_date, prediction_date=None):
         verdict = back
 
     # ── targetFocus ──
-    side = "upper" if weighted_score > 0.25 else ("lower" if weighted_score < -0.25 else None)
-    target_focus = None
-    if side:
-        cand = [z for z in zones if z["side"] == side and z["weightedContribution"] > 0]
-        if cand:
-            top = max(cand, key=lambda z: z["weightedContribution"])
-            raw_d = max(0, (top["lo"] - close) if side == "upper" else (close - top["hi"]))
-            band = _band(raw_d)
-            target_focus = {
-                "side": side, "lo": top["lo"], "hi": top["hi"],
-                "rawDistance": round(raw_d, 1), "adjustedDistance": round(raw_d, 1),
-                "band": band,
-            }
+    target_focus = _target_focus(premarket, back, weighted_score, zones, close)
 
     log(f"判定: {verdict} | coverage {coverage_score:+.4f} | weighted {weighted_score:+.4f} | zones {len(zones)}")
     record = {
@@ -489,6 +480,36 @@ def _band(dist):
     if dist <= 350:
         return {"label": "201–350點", "detail": "中距離", "historicalRate": None, "tone": "neutral", "stakeHint": "觀察"}
     return {"label": "350點以上", "detail": "偏遠區", "historicalRate": None, "tone": "neutral", "stakeHint": "參考"}
+def _target_focus(premarket, back, weighted_score, zones, close):
+    """開市前約距目標。方向優先（2026-09-04 用戶規則）：判市向上（先升／上屠熊）→ 目標係上方熊證區；
+    判市向下（先跌／下殺牛）→ 下方牛證區。冇明確方向先 fallback 用覆蓋加權分揀邊。"""
+    direction = None
+    if premarket and premarket.get("initialDirection"):
+        direction = premarket["initialDirection"]
+    elif back == "上屠熊":
+        direction = "up"
+    elif back == "下殺牛":
+        direction = "down"
+    if direction == "up":
+        side = "upper"
+    elif direction == "down":
+        side = "lower"
+    else:
+        side = "upper" if weighted_score > 0.25 else ("lower" if weighted_score < -0.25 else None)
+    if not side:
+        return None
+    cand = [z for z in zones if z["side"] == side and z["weightedContribution"] > 0]
+    if not cand:
+        return None
+    top = max(cand, key=lambda z: z["weightedContribution"])
+    raw_d = max(0, (top["lo"] - close) if side == "upper" else (close - top["hi"]))
+    band = _band(raw_d)
+    return {
+        "side": side, "lo": top["lo"], "hi": top["hi"],
+        "rawDistance": round(raw_d, 1), "adjustedDistance": round(raw_d, 1),
+        "band": band,
+    }
+
 
 
 def build_dataset(record):
@@ -576,6 +597,9 @@ def refresh_premarket():
         day0["verdict"] = (
             f"先{'升' if d0 == 'up' else '跌'}後{back}" if d0
             else ("窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}")
+        )
+        day0["targetFocus"] = _target_focus(
+            pm, back, day0.get("weightedScore", 0.0), day0.get("zones", []), day0.get("close", 0.0)
         )
         (DAYS_DIR / f"{day0['date']}.json").write_text(json.dumps(day0, ensure_ascii=False))
         ds["refreshedAt"] = datetime.now(HKT).isoformat(timespec="seconds")

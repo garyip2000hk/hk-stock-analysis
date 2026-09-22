@@ -132,6 +132,8 @@ def hk_index_ctx(instrument: str = "HSI") -> dict:
             monthly = [e for e in cand if e["cycle"] == "MONTH"]
             pool = monthly or cand
             e = min(pool, key=lambda x: abs(x["dte"] - mid))
+            if any(p["expiry"] == e["expiry"] for p in picked):
+                continue          # 同一個到期月唔好因為跨桶而重複出現
             picked.append({"expiry": e["expiry"], "dte": e["dte"],
                            "oi": 0, "bucket": label, "cycle": e["cycle"]})
         if not picked:

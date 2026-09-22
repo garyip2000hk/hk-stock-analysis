@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import json
+import re
 import time
+from pathlib import Path
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 import duckdb
 import pandas as pd
 
@@ -38,45 +41,71 @@ def build():
     """, [cs._existing(cs.DAILYLOG_SOURCES), latest_date]).df()
     
     # We need to map issue_id to stock_code
-    sn_df = con.execute("SELECT issue_id, LTRIM(stock_code, '0') as sc, short_name FROM read_parquet(?)", [str(cs.SHORTNAMES)]).df()
-    issue_to_sc = {int(row['issue_id']): row['sc'] for _, row in sn_df.iterrows() if str(row['issue_id']).isdigit()}
-    issue_to_name = {int(row['issue_id']): row['short_name'] for _, row in sn_df.iterrows() if str(row['issue_id']).isdigit()}
+    sn_df = con.execute("SELECT issue_id, LTRIM(stock_code, '0') as sc, short_name, use_date FROM read_parquet(?)", [str(cs.SHORTNAMES)]).df()
+    sn_df = sn_df[sn_df['issue_id'].astype(str).str.isdigit()]
+    sn_df['issue_id'] = sn_df['issue_id'].astype(int)
+    # Stock codes get recycled: per code, the issue with the latest use_date
+    # is the currently listed company. Older issues on the same code belong to
+    # delisted predecessors whose CCASS rows linger in the dailylog.
+    sn_df = sn_df.sort_values('use_date', na_position='first')
+    issue_to_sc = {int(row['issue_id']): row['sc'] for _, row in sn_df.iterrows()}
+    issue_to_name = sn_df.groupby('issue_id')['short_name'].last().to_dict()
+    active_issue_by_sc = {row['sc']: int(row['issue_id']) for _, row in sn_df.groupby('sc').tail(1).iterrows()}
     
     # 3. Compute top 50 concentration
     concentration_top = []
+    skipped_cap = 0
+    skipped_etp = 0
     
-    # Add market cap from quotes.json if available
-    quotes = {}
+    # Market cap 來源：quotes.json 全歷史「逐隻行返轉頭」搵最近一次有價嗰日。
+    # 唔可以淨係讀最後一日——最後一日有機會係 stub（得幾隻股），
+    # 而且停牌股喺停牌期間根本唔會出現喺每日報價度。
+    quote_names = {}
+    latest_close = {}   # code -> (date, close)
     try:
         with open(QUOTES_FILE, 'r') as f:
             q_data = json.load(f)
-            last_q_date = sorted(q_data['quotes'].keys())[-1]
-            quotes = q_data['quotes'][last_q_date]
+            quote_names = q_data.get('names', {})
+            for d in sorted(q_data.get('quotes', {}).keys(), reverse=True):
+                for code, rec in q_data['quotes'][d].items():
+                    c = rec.get('close')
+                    if c and code not in latest_close:
+                        latest_close[code] = (d, c)
     except Exception as e:
         print(f"Failed to load quotes: {e}")
-        
-    for _, row in df_latest.iterrows():
-        iid = row['issue_id']
-        sc = issue_to_sc.get(iid)
-        if not sc or sc not in issued_map:
-            continue
-            
-        issued = issued_map[sc]
-        c5 = row['c5']
-        
-        c5_pct = (c5 / issued * 100) if issued > 0 else 0
-        
-        # Format stock code
-        full_sc = sc.zfill(5)
-        
-        name = issue_to_name.get(iid, "")
-        
-        # Calculate market cap
-        market_cap_str = ""
+
+    # ETF／L&I（ETP）排除：HKEXequity 快照有 product_type，只留 EQTY + REIT。
+    # 搵最新有嘢嗰個日期 folder；ETP 名單好少變，過咗同步日都夠用。
+    etp_codes = set()
+    eq_root = Path('/home/workspace/Desktop/db/HKEXequity/equity')
+    try:
+        for ddir in sorted(eq_root.iterdir(), reverse=True):
+            files = list(ddir.glob('*.json'))
+            if not files:
+                continue
+            for f in files:
+                try:
+                    raw = f.read_text(encoding='utf-8').strip()
+                    if raw.startswith('('):
+                        raw = raw[1:raw.rfind(')')]
+                    pt = json.loads(raw)['data']['quote'].get('product_type')
+                    if pt == 'ETP':
+                        etp_codes.add(f"{int(f.stem):05d}")
+                except Exception:
+                    continue
+            break
+    except Exception as e:
+        print(f"Failed to load ETP list: {e}")
+    print(f"ETP codes loaded: {len(etp_codes)}")
+
+    def mcap_fields(full_sc, issued, ccass_name):
+        # 名：HKEX 每日報價 short name 優先（乾淨），CCASS 後備（要剷走合股/供股後綴）
+        name = quote_names.get(full_sc) or re.sub(r'-(NEW|[A-Z]?\d+[KM]?)$', '', ccass_name or '')
+        q = latest_close.get(full_sc)
         mc = 0
-        q = quotes.get(full_sc)
-        if q and q.get('close'):
-            mc = q['close'] * issued
+        market_cap_str = ""
+        if q:
+            mc = q[1] * issued
             if mc >= 1e12:
                 market_cap_str = f"{mc/1e12:.1f}兆"
             elif mc >= 1e11:
@@ -85,9 +114,36 @@ def build():
                 market_cap_str = f"{mc/1e10:.1f}百億"
             elif mc >= 1e8:
                 market_cap_str = f"{mc/1e8:.1f}億"
-        else:
-            # Fake a high market cap if no quotes, or 0
-            pass
+        return name, market_cap_str, mc
+        
+    for _, row in df_latest.iterrows():
+        iid = row['issue_id']
+        sc = issue_to_sc.get(iid)
+        if not sc or sc not in issued_map:
+            continue
+        # skip rows from old companies sitting on a recycled stock code
+        if active_issue_by_sc.get(sc) != int(iid):
+            continue
+        # skip ETF / leveraged & inverse products
+        if sc.zfill(5) in etp_codes:
+            skipped_etp += 1
+            continue
+            
+        issued = issued_map[sc]
+        c5 = row['c5']
+        
+        # fallback cap: CCASS c5 can never exceed issued shares; if it does,
+        # issued_shares is stale/wrong (e.g. ETF units created after the snapshot)
+        if issued <= 0 or c5 > issued:
+            skipped_cap += 1
+            continue
+        
+        c5_pct = (c5 / issued * 100)
+        
+        # Format stock code
+        full_sc = sc.zfill(5)
+        
+        name, market_cap_str, mc = mcap_fields(full_sc, issued, issue_to_name.get(iid, ""))
             
         concentration_top.append({
             "stock_code": full_sc,
@@ -118,10 +174,17 @@ def build():
             past_vals[row['issue_id']] = v[0]
             
     movement_top = []
+    skipped_movement = 0
     for _, row in df_latest.iterrows():
         iid = row['issue_id']
         sc = issue_to_sc.get(iid)
         if not sc or sc not in issued_map:
+            continue
+        if active_issue_by_sc.get(sc) != int(iid):
+            continue
+        # skip ETF / leveraged & inverse products
+        if sc.zfill(5) in etp_codes:
+            skipped_etp += 1
             continue
             
         issued = issued_map[sc]
@@ -129,6 +192,10 @@ def build():
         c5_past = past_vals.get(iid)
         
         if c5_past is not None and issued > 0:
+            # same integrity guard as concentration
+            if c5_now > issued or c5_past > issued:
+                skipped_movement += 1
+                continue
             pct_now = c5_now / issued * 100
             pct_past = c5_past / issued * 100
             delta_pct = pct_now - pct_past
@@ -136,20 +203,7 @@ def build():
             # exclude abnormal > 100% changes
             if delta_pct > 0 and delta_pct < 100:
                 full_sc = sc.zfill(5)
-                name = issue_to_name.get(iid, "")
-                mc = 0
-                market_cap_str = ""
-                q = quotes.get(full_sc)
-                if q and q.get('close'):
-                    mc = q['close'] * issued
-                    if mc >= 1e12:
-                        market_cap_str = f"{mc/1e12:.1f}兆"
-                    elif mc >= 1e11:
-                        market_cap_str = f"{mc/1e11:.1f}千億"
-                    elif mc >= 1e10:
-                        market_cap_str = f"{mc/1e10:.1f}百億"
-                    elif mc >= 1e8:
-                        market_cap_str = f"{mc/1e8:.1f}億"
+                name, market_cap_str, mc = mcap_fields(full_sc, issued, issue_to_name.get(iid, ""))
                         
                 movement_top.append({
                     "stock_code": full_sc,
@@ -165,14 +219,14 @@ def build():
     # Front-end filters by market_cap_yi < 50
     # To keep it compatible, we provide what they need
     result = {
-        'last_updated': datetime.now().isoformat(),
+        'last_updated': datetime.now(ZoneInfo('Asia/Hong_Kong')).isoformat(),
         'source': 'Local CCASS (Auto)',
         'concentration': {
-            'updated_at': datetime.now().isoformat(),
+            'updated_at': datetime.now(ZoneInfo('Asia/Hong_Kong')).isoformat(),
             'rows': concentration_top
         },
         'big_investor_movement': {
-            'updated_at': datetime.now().isoformat(),
+            'updated_at': datetime.now(ZoneInfo('Asia/Hong_Kong')).isoformat(),
             'rows': movement_top
         }
     }
@@ -180,6 +234,8 @@ def build():
     with open(CACHE_FILE, 'w') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
         
+    if skipped_cap or skipped_movement:
+        print(f"[{datetime.now()}] Data integrity: skipped {skipped_cap} concentration row(s), {skipped_movement} movement row(s) where CCASS c5 exceeded issued shares; {skipped_etp} ETP row(s).")
     print(f"[{datetime.now()}] Leaderboard saved in {round(time.time() - start, 2)}s.")
 
 if __name__ == '__main__':

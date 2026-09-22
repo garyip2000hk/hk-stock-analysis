@@ -217,9 +217,9 @@ def _leg(row: pd.Series, qty: int) -> dict | None:
 
 
 def _by_delta(df: pd.DataFrame, spot: float, t: float, target_delta: float,
-              cp: str, atm_iv: float) -> pd.Series | None:
+              cp: str, atm_iv: float, min_oi: float = MIN_OI) -> pd.Series | None:
     """揀最接近目標 delta 嘅行使價（用該行使價自己嘅 IV，缺就用 ATM IV）。"""
-    sub = df[(df.type == cp) & (df.oi >= MIN_OI) & (df.settle > 0)]
+    sub = df[(df.type == cp) & (df.oi >= min_oi) & (df.settle > 0)]
     if sub.empty:
         sub = df[(df.type == cp) & (df.settle > 0)]
     if sub.empty:

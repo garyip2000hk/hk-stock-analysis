@@ -41,6 +41,17 @@ def run():
         print(f"  ✗ {e}")
 
 
+    # 1c. 財技動作 cache 增量更新（公告庫 → corp_actions_cache.json）
+    print("\n[1c/15] Corp Actions Cache Update...")
+    try:
+        import corp_actions_updater
+        added = corp_actions_updater.update()
+        report["sections"]["corp_actions"] = {"status": "ok", "added": added}
+    except Exception as e:
+        report["sections"]["corp_actions"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
+
     # 1b. CCASS 覆蓋缺口檢查（對真交易日曆）
     print("\n[1b/15] CCASS Coverage Gap Check...")
     try:
