@@ -344,7 +344,7 @@ zone 只留 ±3000 點內或 overlap>0。`outstanding` 單位 = 百萬份（stre
 - 「後」（`_sheet_back_direction`，存 `sheetBack`）：GS 相對期指張數邏輯——動態 200 點格（anchor=round(close,100)，同 sheet 標籤格線一致），上下各取最近 3 格；可達條件 = 上方格（格頂−close）< DayRange、下方格（close−格底）< DayRange，其中 **DayRange = EM = close×VHSI/√252（今日預期 1σ 波幅，前瞻；2026-09-08 改——舊（昨日 High−Low）/2 喺低波幅日過窄，令最近牛熊區全「不可達」而誤判窄幅）**；相對期指張數 upSum−downSum > +500 → 上屠熊、< −500 → 下殺牛、否則窄幅。
   - **相對期指張數 = 街貨量 ÷（換股比率 × 50）**，2026-08-21 對 gswarrants 官方表（hsi-cbbc-outstanding-distribution）對數 19/19 全中（遠區誤差 ≤0.3%），完全由 OpenD 計，唔使依賴 GS scrape。近現價區會因即日收回/數據日差異有出入，屬預期。
   - ⚠️ 用戶 sheet 本身有 stale-label 缺陷：D 欄區間標籤（25,700-25,899 式）同 GS 實際表（25,800-25,999 式固定格）唔齊，下方最近區標成 25,000（實際 25,500-25,699），令 F 欄距離長期高估 → down_sum 成日當 0。移植版用乾淨數據重新 bin，冇呢個問題（同一日 sheet 話「後向上」，乾淨數據會係「後窄幅」——08-20 close 25,698 案例 diff=+320）。
-- **`targetFocus` 方向優先（2026-09-04 用戶規則）**：開市前約距目標跟方向走，唔再淨係睇 `weightedScore`。判市向上（先升／上屠熊）→ 目標揀上方熊證區；向下（先跌／下殺牛）→ 下方牛證區；冇方向先 fallback `weightedScore ±0.25` 揀邊。抽咗做 `_target_focus()`，`build_day` 同 `refresh_premarket`（08:45 重算 premarket）都 call 佢。
+- **`targetFocus` 方向優先（2026-09-04 用戶規則）**：開市前約距目標跟方向走，唔再淨係睇 `weightedScore`。判市向上（先升／上屠熊）→ 目標揀上方熊證區；向下（先跌／下殺牛）→ 下方牛證區；冇方向先 fallback `weightedScore ±0.25` 揀邊。抽咗做 `_target_focus()`，`build_day` 同 `refresh_premarket`（08:45 重算 premarket）都 call 佢。- **verdict 用字（2026-10-06 用戶規則）**：有先向（先升／先跌）而「後」係**相反方向**（先升配下殺牛／先跌配上屠熊）時，verdict 寫「先升後回」／「先跌後回」，唔好寫「後下殺牛」／「後上屠熊」；同向（先升後上屠熊／先跌後下殺牛）照舊。抽咗做 `_compose_verdict()`，`build_day` 同 `push_only` 都 call 佢；歷史日唔改寫（只影響新判定）。
 - 舊規則（±100 OR、weightedScore ±0.25 判後向）已廢；weightedScore 仍然計（targetFocus 用）。
 
 `cbbc_radar_scheduler.py` — 常駐服務 `cbbc-radar-scheduler`，每個交易日 08:00 HKT 跑 builder；**啟動 catch-up（2026-09-17）**：主機遲過 08:00–09:10 窗口先起身（例如重啟）會喺 16:00 前補跑一次今日 build（判定每日仍只做一次）

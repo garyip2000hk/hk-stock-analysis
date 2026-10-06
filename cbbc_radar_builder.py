@@ -441,11 +441,7 @@ def build_day(ctx, trading_date, prediction_date=None):
     log(f"sheet 後向: up {sheet_back['upSum']:.0f} vs down {sheet_back['downSum']:.0f} "
         f"(diff {sheet_back['diff']:+.0f}, DayRange {sheet_back['dayRange']:.0f}) → {back}")
     if premarket:
-        d0 = premarket.get("initialDirection")
-        if d0:
-            verdict = f"先{'升' if d0 == 'up' else '跌'}後{back}"
-        else:
-            verdict = "窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}"
+        verdict = _compose_verdict(premarket.get("initialDirection"), back)
     else:
         verdict = back
 
@@ -470,6 +466,17 @@ def build_day(ctx, trading_date, prediction_date=None):
         "predictionDate": prediction_date or trading_date,
     }
     return record
+
+
+def _compose_verdict(d0, back):
+    """組「先X後Y」verdict。2026-10-06 用戶規則：有先向（先升／先跌）時，
+    「後」若係相反方向（先升配下殺牛／先跌配上屠熊），唔好寫殺牛屠熊，改寫「後回」。"""
+    if d0 in ("up", "down"):
+        first = "先升" if d0 == "up" else "先跌"
+        if (d0 == "up" and back == "下殺牛") or (d0 == "down" and back == "上屠熊"):
+            return f"{first}後回"
+        return f"{first}後{back}"
+    return "窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}"
 
 
 def _band(dist):
@@ -593,11 +600,7 @@ def refresh_premarket():
         sb = day0.get("sheetBack") or {}
         back = sb.get("label") or ("上屠熊" if day0.get("weightedScore", 0) >= 0.25
                                    else ("下殺牛" if day0.get("weightedScore", 0) <= -0.25 else "窄幅波動"))
-        d0 = pm.get("initialDirection")
-        day0["verdict"] = (
-            f"先{'升' if d0 == 'up' else '跌'}後{back}" if d0
-            else ("窄幅波動" if back == "窄幅波動" else f"先窄幅波動後{back}")
-        )
+        day0["verdict"] = _compose_verdict(pm.get("initialDirection"), back)
         day0["targetFocus"] = _target_focus(
             pm, back, day0.get("weightedScore", 0.0), day0.get("zones", []), day0.get("close", 0.0)
         )
