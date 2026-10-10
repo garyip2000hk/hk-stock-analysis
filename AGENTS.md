@@ -47,6 +47,7 @@
   （`snapshot` / `movements` 子命令）。
 - `hybrid_ccass_pipeline.py` — 舊介面，內部已改為呼叫 `ccass_snapshot`，
   保持 `--range` / `--local-only` 等參數向後兼容。
+- `ccass_topadds.py` — **CCASS 近 1 年加倉頭 5 大＋估算均買價（2026-10-10，gsmart-box 圖表 CCASS5大 指標後端）**：`top_adds(stock)` 每個參與者基準＝window 起點前最後已知持倉（window 內先出現＝0），delta=期末−基準 取 top N；均價＝加倉日加咗幾多股 × 當日收市價加權（價源 `Desktop/db/Futu/Kline/kline_day.parquet`，缺日 fallback `CCASS quotes.parquet`，再 forward-fill）。CLI `python3 ccass_topadds.py --stock 00700 [--days 365] [--top 5]`；zo.space `/api/ccass-topadds`（30 分鐘 cache）代跑
 - `ccass_local.py` — 舊版逐日查詢（**有第 1 個 bug**，勿再用嚟做快照）。
 - `validate_ccass.py` — 拿 40 隻股票對 `dailylog` 公佈值做回歸測試。
   改動 CCASS 邏輯後**必須跑一次**，目標 40/40。
@@ -100,7 +101,7 @@ python3 position_tracker.py 01241 2025-09-18 2026-09-16 --points 24   # 輸出 J
 
 - 本地 change-log：2023-01-03 → 2026-07-31
 - `issued_shares.parquet`：3,170 隻股票已發行股數（由 `Desktop/db/HKEXequity/equity/` 抽取）
-- 超出本地範圍時 `ccass_scraper.py` 會上網補抓（慢，~19s）
+- 超出本地範圍時 `ccass_scraper.py` 會上網補抓（慢，~19s）- **分母過期保護（2026-10-07，02570 集中度 132% 修復）**：HKEXequity equity dump 停喺 20260522（Windows scraper 停咗），新股上市後增發／超額配售令已發行股數過期（02570 REFIRE：parquet 記 62.13M H股，實際 CCASS 已持 90.10M）→ 每個 broker % 膨脹 ×1.45，集中度爆 >100%。`ccass_snapshot.py` 現檢測 `ccass_total > issued` 就當分母過期，fallback 用 CCASS 總持股，`basis="issued_shares_stale"`＋`issued_stale: true`（`ccass_api.py` 有轉發）；`/stock-analysis` 股權集中度 tab 出黃色提示。新上市股（issue id 3xxx 一批 2026 中後上市）全受影響，呢個 guard 一次過覆蓋。根治＝重新抓 HKEXequity equity dump 後重跑 `build_issued_shares.py`
 
 ## imported/ 快取同步（2026-08-07 修好）
 
@@ -508,7 +509,7 @@ API `/api/condor-gate` → 私人頁面 `https://garysir.zo.space/stock-analysis
 - `direction_advisor_service.py` — 常駐服務 `option-advisor-api`（http private，port 8895）：
   `GET /health /stocks /analyze?code=<5位>&dir=up|flat|down`。結果 10 分鐘 cache（key code:dir）；
   `iv_analyzer.analyse()` 全鏈結果亦有 in-process cache。**要用 `/usr/local/bin/python3`**（pandas）。
-- zo.space：頁 `/option-advisor`（private）＋API `/api/option-advisor`（proxy 8895，`?path=` 映射）。
+- zo.space：頁 `/option-advisor` ＋API `/api/option-advisor`（proxy 8895，`?path=` 映射）。**2026-10-10 合規閘**：API 嘅 analyze／stocks／order_spec（同所有非 GET）都要求 `X-Advisor-Token`（token 檔 `/home/workspace/stock-analysis/.advisor_token`，600，已 gitignore）；orders／positions 照舊只收 ext token。頁面要 `#tok=` 帶入先解鎖（存 localStorage 後鏟 hash），無 token 公眾／搜尋器只見「會員專區」鎖屏。gsmart-box 端：`GET /api/gsmart-desk/advisor-token`（會員閘）發 token、GsmartAiOptions iframe `#tok=` 帶入、advisor proxy fallback 帶 `X-Advisor-Token` header（env `ZO_ADVISOR_TOKEN` 優先，Manus 部署要設呢個 env）。**Manus 未設 env 嘅話 fallback 會 401**。
 - ⚠️ 數據係 HKEX 每日結算價（非即市 bid/ask）；首次分析要 ~10 秒（拆全鏈）。
 - ⚠️ 2026-08-24 實測 00700：窄幅方向候選全部負期望（Short Strangle −$1,297 等）——
   同「真回測 vs 舊鐵鷹」結論一致：港股單股賣方冇無腦正期望。頁面全部負期望時會彈警告。
@@ -547,3 +548,29 @@ CLI：`--print` 只印摘要。`call(tool, args)` 係通用 wrapper，日後想�
 ⚠️ 權限：現 token scope 得 watchlist——報價／K線／異動／訊號／牛熊證 OK；**賬戶、持倉、
 落單要 403308**，要重生成 code（https://open.longbridge.com/connect 剔齊權限）。落單工具
 本身有兩步確認（dry run → confirmation_code）。
+
+## 半新股監察版面（2026-10-07 新增）
+
+**版面**：私人頁 `https://garysir.zo.space/stock-analysis/halfnew`（zo.space page route，
+預設 2 年窗口；另有 6 個月／1 年／全部揀法、上市方式篩選、代號／名稱搜尋、全部欄位可排序）。
+API `/api/halfnew-listings`（公開＋rate limit）直讀 `halfnew_listings.json`。
+
+**數據**：`halfnew_listings.json`（264 隻，2024/09/06 → 2026/09/30）三源合一：
+1. AASTOCKS 已上市 IPO 表（`listedipo.aspx?s=3&o=0&page=N`，263 隻，欄位語義清晰：
+   招股價／上市價／超額%／現價／首日／累積／上市市值）——主檔；
+2. DT cache（`dt_halfnew_raw.json`，2026-07-29 半新股快照，demo 戶口睇唔到 live 頁，
+   /halfnew 係收費功能）補：上市方式（解析 raw_line 最尾 token）＋市值＋CCASS 三值快照
+   （`ccass_snapshot`，DT 欄位定義未經官方確認，原樣顯示）；
+3. `imported/quotes.json` 補現價／累積表現。
+
+**更新**：`python3 halfnew_listings_updater.py` — 重掛 DT cache（冇新 DT 刮片時冇變化），
+日後想補新 IPO：重刮 AASTOCKS 分頁（agent-browser `fetch` 內 `GoPage` pattern，
+curl 會 403）merge 落 rows。半新股揀股掃描沿用 `halfnew_screener.py`／`halfnew_full_scan.py`
+（跌 70%＋橫行 9 個月＋CCASS 收貨）。
+
+## 全市場條件選股引擎（2026-10-09 新增）
+- `screener_cache.py` — 由 Yahoo Finance（split-adjusted Close）拉全港股 3 年日線 → `screener_data/hk_daily.parquet`（3,152 隻×2.13M 行）＋`universe.parquet`（名稱＋流通股數）；剔除 ETF/單位信託（00880/07515/02828 等）。冪等：舊 parquet 保留 3 年，逐批 download（5 秒重試×3、指數退避，401/403/404 直接 skip）。
+- `screener_engine.py` — 讀 cache 篩選：市值上限（最新收市×流通股）、N 年跌幅（窗口尾收市 vs 整年（252 日）前收市）、年化波幅上限（日回報 std×√252，可調窗口）、成交量比率近期/前期（vol_flat_lo/hi）＋近 60 日零成交剔除（停牌/死股，maxZeroVolDays）＋日均成交額下限。輸出 JSON（stdin 傳 `--json` 或 pipe `{...}`）。結果帶 `kline`（最近 240 日 OHLCV）俾前端畫 recharts 圖。
+- 每日刷新：`daily_pipeline.py` step [15a] 跑 `screener_cache.py`（timeout 1800s）。
+- 服務介面：gsmart-box `/api/gsmart-desk/screener`（spawn 引擎）→ **Zo 機冇引擎時 fallback `https://garysir.zo.space/api/stock-screener`**（zo.space route 內 spawn 同一引擎，Manus 部署冇 python 就靠呢條）。
+- Gsmart 頁 `/tools/stock-screener`（Pro tier，財技股類別側欄「自訂條件選股」），預設：市值<300M、兩年跌≥60%、年化波幅≤30%、量比 0.5–2。
