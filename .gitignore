@@ -19,3 +19,4 @@ config.local.json
 
 # 每日健康報告（勿入 git）
 reports/
+.advisor_token
