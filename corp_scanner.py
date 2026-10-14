@@ -13,6 +13,20 @@ from pathlib import Path
 CACHE_DIR = Path(__file__).parent
 CACHE_FILE = CACHE_DIR / "corp_actions_cache.json"
 
+
+def _norm_date(d):
+    """HKEX 回 DD/MM/YYYY；統一轉 ISO YYYY-MM-DD，避免分析端 strptime 爆炸。"""
+    d = (d or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+        return d
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", d)
+    if m:
+        return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    m = re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})$", d)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return d
+
 EVENT_KEYWORDS = {
     "rights_issue": ["供股", "RIGHT ISSUE", "RIGHTS ISSUE", "公開發售", "OPEN OFFER"],
     "placing": ["配售", "配股", "PLACING", "先舊後新", "TOP-UP PLACING"],
@@ -72,7 +86,7 @@ def scan_hkex_announcements_today():
             
             if action_types:
                 events.append({
-                    'date': date_str,
+                    'date': _norm_date(date_str),
                     'type': action_types[0],
                     'title': title.strip(),
                     'stock_code': stock_code,

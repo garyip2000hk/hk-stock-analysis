@@ -86,7 +86,11 @@ STATUS_LABEL = {
 
 
 def _d(value: str) -> date:
-    return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    v = (value or "").strip()
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})", v)
+    if m:  # DD/MM/YYYY（HKEX 舊格式殘留）
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    return datetime.strptime(v[:10], "%Y-%m-%d").date()
 
 
 def _load_cache() -> dict:
