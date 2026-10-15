@@ -352,15 +352,48 @@ def _participant_names() -> dict[int, dict[str, str]]:
     return out
 
 
+def suggest_participants(query: str, limit: int = 24) -> dict:
+    """CCASS 倉位建議清單：名稱子串／ccass_id 前綴／part_id 完全匹配，供前端 autocomplete。"""
+    q = (query or "").strip().lower()
+    pars = _participant_names()
+    rows = [
+        {"part_id": pid, "ccass_id": v.get("ccass_id") or "", "name": v.get("name") or ""}
+        for pid, v in pars.items()
+    ]
+    if q:
+        scored: list[tuple[int, int, str, dict]] = []
+        for r in rows:
+            name_l = r["name"].lower()
+            ccass_l = (r["ccass_id"] or "").lower()
+            pid_s = str(r["part_id"])
+            idx = name_l.find(q)
+            id_hit = bool(ccass_l.startswith(q)) or pid_s == q
+            if idx < 0 and not id_hit:
+                continue
+            scored.append((idx if idx >= 0 else 999, len(r["name"]), r["name"], r))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        rows = [r for _, _, _, r in scored[:limit]]
+    else:
+        rows = sorted(rows, key=lambda r: r["name"])[:limit]
+    return {"ok": True, "mode": "suggest", "query": query, "items": rows}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stock", required=True)
+    ap.add_argument("--stock")
+    ap.add_argument("--suggest", help="倉位建議：打名子串回傳建議清單（autocomplete 用，唔使 --stock）")
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--as-of")
     ap.add_argument("--start", help="自訂 window 起點 YYYY-MM-DD（優先過 --days）")
     ap.add_argument("--participant", help="自選倉位：CCASS 參與者 ccass_id／part_id／名稱子串（例如 HSBC）")
     args = ap.parse_args()
+    if args.suggest is not None:
+        print(json.dumps(suggest_participants(args.suggest), ensure_ascii=False))
+        return 0
+    if not args.stock:
+        print(json.dumps({"error": "missing --stock"}))
+        return 2
     print(json.dumps(top_adds(args.stock, days=args.days, top_n=args.top, as_of=args.as_of,
                               start_date=args.start, participant=args.participant),
                      ensure_ascii=False, default=str))
