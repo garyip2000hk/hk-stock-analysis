@@ -91,7 +91,17 @@ def _ffill_close(by_date: dict[str, float], dates: list[str], d: str) -> float |
     return by_date[dates[i]] if i >= 0 else None
 
 
-def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None = None) -> dict:
+def _valid_iso(s: str | None) -> str | None:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s).isoformat()
+    except ValueError:
+        return None
+
+
+def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None = None,
+             start_date: str | None = None) -> dict:
     code = cs.pad_code(stock_code)
     issue_id = cs.resolve_issue_id(stock_code)
     if issue_id is None:
@@ -105,13 +115,19 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
     if not cov_end:
         return {"error": "本地 CCASS 覆蓋範圍不明", "stock_code": code}
     end = min(as_of, cov_end) if as_of else cov_end
-    try:
-        wanted_start = (date.fromisoformat(end) - timedelta(days=days)).isoformat()
-    except ValueError:
-        wanted_start = end
-    start = min(wanted_start, end)
+    custom_start = _valid_iso(start_date)
+    if custom_start:
+        # 自訂起點：clamp 入 coverage 範圍，並且唔可以遲過 end
+        start = min(custom_start, end)
+    else:
+        try:
+            wanted_start = (date.fromisoformat(end) - timedelta(days=max(1, days))).isoformat()
+        except ValueError:
+            wanted_start = end
+        start = min(wanted_start, end)
     if cov_start and start < cov_start:
         start = cov_start
+    eff_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
 
     # 讀晒呢隻股 window 前一個月起到 end 嘅 change-log（要 window 前資料做基準）
     pre = (date.fromisoformat(start) - timedelta(days=45)).isoformat()
@@ -215,7 +231,7 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
 
     return {
         "stock_code": code,
-        "window": {"start": start, "end": end},
+        "window": {"start": start, "end": end, "days": eff_days},
         "coverage": [cov_start, cov_end],
         "basis": "issued_shares" if (base and base == raw_issued and not issued_stale)
                  else ("issued_shares_stale" if issued_stale else "ccass_total"),
@@ -261,8 +277,10 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--as-of")
+    ap.add_argument("--start", help="自訂 window 起點 YYYY-MM-DD（優先過 --days）")
     args = ap.parse_args()
-    print(json.dumps(top_adds(args.stock, days=args.days, top_n=args.top, as_of=args.as_of),
+    print(json.dumps(top_adds(args.stock, days=args.days, top_n=args.top, as_of=args.as_of,
+                              start_date=args.start),
                      ensure_ascii=False, default=str))
     return 0
 
