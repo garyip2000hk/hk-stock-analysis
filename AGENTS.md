@@ -99,9 +99,10 @@ python3 position_tracker.py 01241 2025-09-18 2026-09-16 --points 24   # 輸出 J
 
 ## 資料覆蓋
 
-- 本地 change-log：2023-01-03 → 2026-07-31
+- 本地 change-log：2023-01-03 → 2026-10-12（`parthold` 2023-01-03→2026-05-22、`incremental` 2025-12-29→2026-05-22、`holdings` 2026-05-26→2026-10-12；`ccass_local.manifest()` 係權威）
 - `issued_shares.parquet`：3,170 隻股票已發行股數（由 `Desktop/db/HKEXequity/equity/` 抽取）
-- 超出本地範圍時 `ccass_scraper.py` 會上網補抓（慢，~19s）- **分母過期保護（2026-10-07，02570 集中度 132% 修復）**：HKEXequity equity dump 停喺 20260522（Windows scraper 停咗），新股上市後增發／超額配售令已發行股數過期（02570 REFIRE：parquet 記 62.13M H股，實際 CCASS 已持 90.10M）→ 每個 broker % 膨脹 ×1.45，集中度爆 >100%。`ccass_snapshot.py` 現檢測 `ccass_total > issued` 就當分母過期，fallback 用 CCASS 總持股，`basis="issued_shares_stale"`＋`issued_stale: true`（`ccass_api.py` 有轉發）；`/stock-analysis` 股權集中度 tab 出黃色提示。新上市股（issue id 3xxx 一批 2026 中後上市）全受影響，呢個 guard 一次過覆蓋。根治＝重新抓 HKEXequity equity dump 後重跑 `build_issued_shares.py`
+- 超出本地範圍時 `ccass_scraper.py` 會上網補抓（慢，~19s）
+- **日期早於覆蓋起點要講清楚（2026-10-14 修）**：`ccass_snapshot.snapshot()` 冇 rows 且 `as_of` 早於 `coverage_range()[0]` 時，唔再回「冇本地 CCASS 持倉紀錄」，改回「所選日期 X 早於本地 CCASS 資料起點 Y，請將日期改到 Y 至 Z 之間」＋`coverage`。原因：用戶喺 `/stock-analysis` 倉位對比 tab 用「由 2022-10-14」查 01888，舊訊息令人以為隻股冇數據，其實係日期早過本地起點- **分母過期保護（2026-10-07，02570 集中度 132% 修復）**：HKEXequity equity dump 停喺 20260522（Windows scraper 停咗），新股上市後增發／超額配售令已發行股數過期（02570 REFIRE：parquet 記 62.13M H股，實際 CCASS 已持 90.10M）→ 每個 broker % 膨脹 ×1.45，集中度爆 >100%。`ccass_snapshot.py` 現檢測 `ccass_total > issued` 就當分母過期，fallback 用 CCASS 總持股，`basis="issued_shares_stale"`＋`issued_stale: true`（`ccass_api.py` 有轉發）；`/stock-analysis` 股權集中度 tab 出黃色提示。新上市股（issue id 3xxx 一批 2026 中後上市）全受影響，呢個 guard 一次過覆蓋。根治＝重新抓 HKEXequity equity dump 後重跑 `build_issued_shares.py`
 
 ## imported/ 快取同步（2026-08-07 修好）
 

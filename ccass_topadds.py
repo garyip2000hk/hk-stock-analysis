@@ -101,7 +101,7 @@ def _valid_iso(s: str | None) -> str | None:
 
 
 def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None = None,
-             start_date: str | None = None) -> dict:
+             start_date: str | None = None, participant: str | None = None) -> dict:
     code = cs.pad_code(stock_code)
     issue_id = cs.resolve_issue_id(stock_code)
     if issue_id is None:
@@ -225,6 +225,87 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
         items.append((delta, item))
 
     items.sort(key=lambda x: x[0], reverse=True)
+
+    # ── 自選倉位模式：追蹤指定 CCASS 參與者（ccass_id／part_id／名稱子串），回傳每日持倉數列 ──
+    part_q = (participant or "").strip()
+    if part_q:
+        q_lower = part_q.lower()
+        matched: dict[int, list[tuple[str, int]]] = {}
+        for part_id, series in by_part.items():
+            meta = pars.get(part_id, {})
+            cid = str(meta.get("ccass_id") or "")
+            pname = str(meta.get("name") or "")
+            if cid.lower() == q_lower or str(part_id) == part_q or q_lower in pname.lower():
+                matched[part_id] = series
+        if not matched:
+            return {"error": f"CCASS 搵唔到參與者「{part_q}」（試券商名子串，例如 HSBC／CITIBANK／UBS）", "stock_code": code}
+        out_items = []
+        for part_id, series in matched.items():
+            meta = pars.get(part_id, {})
+            # window 每日 forward-fill 持倉（起點前最後已知做第一點）
+            ffd: list[tuple[str, int]] = []
+            last = 0
+            for d, h in series:
+                if d > end:
+                    break
+                last = h
+                if d >= start:
+                    ffd.append((d, h))
+            baseline = 0
+            for d, h in series:
+                if d <= start:
+                    baseline = h
+                else:
+                    break
+            final = series[-1][1]
+            delta = final - baseline
+            # 加倉日均價（同 top5 一套加權邏輯）
+            added_w = 0
+            wsum = 0.0
+            prev = baseline
+            first_add = last_add = None
+            for d, h in series:
+                if d < start or d > end:
+                    prev = h if d <= end else prev
+                    continue
+                step = h - prev
+                prev = h
+                if step > 0:
+                    if first_add is None:
+                        first_add = d
+                    last_add = d
+                    close = _ffill_close(by_close, close_dates, d)
+                    if close is not None:
+                        added_w += step
+                        wsum += step * close
+            out_items.append({
+                "participant_id": meta.get("ccass_id") or str(part_id),
+                "name": meta.get("name") or f"PARTICIPANT {part_id}",
+                "shares_before": baseline,
+                "shares_after": final,
+                "added": delta,
+                "pct_added": round(delta * 100 / base, 2) if base else None,
+                "avg_price": round(wsum / added_w, 3) if added_w > 0 and wsum > 0 else None,
+                "weighted_shares": added_w,
+                "first_add": first_add,
+                "last_add": last_add,
+            })
+        series_out = [{"d": d, "s": h} for d, h in ffd]
+        if baseline and (not series_out or series_out[0]["d"] != start):
+            series_out.insert(0, {"d": start, "s": baseline})
+        return {
+            "stock_code": code,
+            "mode": "participant",
+            "participant_query": part_q,
+            "window": {"start": start, "end": end, "days": eff_days},
+            "coverage": [cov_start, cov_end],
+            "basis": "issued_shares" if (base and base == raw_issued and not issued_stale)
+                     else ("issued_shares_stale" if issued_stale else "ccass_total"),
+            "price_source": price_source or "unavailable",
+            "items": out_items,
+            "series": series_out,
+        }
+
     top = [it for _, it in items[: max(1, top_n)]]
     for i, it in enumerate(top, 1):
         it["rank"] = i
@@ -278,9 +359,10 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--as-of")
     ap.add_argument("--start", help="自訂 window 起點 YYYY-MM-DD（優先過 --days）")
+    ap.add_argument("--participant", help="自選倉位：CCASS 參與者 ccass_id／part_id／名稱子串（例如 HSBC）")
     args = ap.parse_args()
     print(json.dumps(top_adds(args.stock, days=args.days, top_n=args.top, as_of=args.as_of,
-                              start_date=args.start),
+                              start_date=args.start, participant=args.participant),
                      ensure_ascii=False, default=str))
     return 0
 
