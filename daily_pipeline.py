@@ -497,6 +497,18 @@ def run():
         report["sections"]["condor_gate"] = {"status": "error", "error": str(e)}
         print(f"  ✗ {e}")
 
+    print("\n[15a] Stock screener cache (3y daily)...")
+    try:
+        import subprocess
+        r = subprocess.run(["python3", "screener_cache.py"], cwd=str(BASE), timeout=1800,
+                           capture_output=True, text=True)
+        report["sections"]["screener_cache"] = {"status": "ok" if r.returncode == 0 else "error",
+                                                 "tail": (r.stdout or r.stderr)[-300:]}
+        print("  ✓" if r.returncode == 0 else f"  ✗ {r.stderr[-300:]}")
+    except Exception as e:
+        report["sections"]["screener_cache"] = {"status": "error", "error": str(e)}
+        print(f"  ✗ {e}")
+
     print("\n[15/15] Saving report...")
     out = BASE / "daily_report.json"
     with open(out, "w", encoding="utf-8") as fh:
