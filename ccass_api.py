@@ -52,6 +52,7 @@ def snapshot_payload(stock: str, as_of: str | None = None, top_n: int = 30) -> d
         # a 100% figure that is really "sum of what we can see".
         "basis": snap["basis"],
         "issued_shares": snap["issued_shares"],
+        "issued_stale": snap.get("issued_stale"),
         "percentage_base": snap["percentage_base"],
         "ccass_total": snap["ccass_total"],
         "ccass_share_of_issued": snap["ccass_share_of_issued"],

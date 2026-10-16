@@ -186,11 +186,31 @@ def snapshot(stock_code, as_of: str | None = None, top_n: int = 30) -> dict:
         ).fetchone()[0]
 
     if not rows:
+        cov_start, cov_end = coverage_range()
+        as_of_day = str(as_of)[:10] if as_of else None
+        if as_of_day and cov_start and as_of_day < cov_start:
+            # A date before the local change-log's first day has no rows at all,
+            # so the generic "no holdings" message reads as "this stock has no
+            # CCASS data" when the real problem is the window start.
+            return {
+                "error": (
+                    f"{code} 所選日期 {as_of_day} 早於本地 CCASS 資料起點 {cov_start}，"
+                    f"請將日期改到 {cov_start} 至 {cov_end} 之間"
+                ),
+                "stock_code": code,
+                "coverage": [cov_start, cov_end],
+            }
         return {"error": f"{code} 冇本地 CCASS 持倉紀錄", "stock_code": code}
 
     log = _dailylog(issue_id, as_of)
     ccass_total = sum(r[3] for r in rows)
-    issued = issued_shares(stock_code)
+    raw_issued = issued_shares(stock_code)
+    # CCASS can never hold more shares than are issued. If it does, the issued
+    # count is stale (e.g. over-allotment / H-share increase after the last
+    # HKEXequity dump — 2026-10: 02570 REFIRE had 62.1M on record vs 90.1M in
+    # CCASS, inflating every % x1.45 so top-5 read 132.76%). Fall back instead.
+    issued_stale = bool(raw_issued and ccass_total > raw_issued)
+    issued = None if issued_stale else raw_issued
     # Prefer issued shares (matches HKEX/webb-site "Stake %"), else CCASS total.
     base = issued or (log or {}).get("intermed_hldg") or ccass_total
 
@@ -244,8 +264,10 @@ def snapshot(stock_code, as_of: str | None = None, top_n: int = 30) -> dict:
         "last_movement": last_move,
         "dailylog_date": log_date,
         "source": "local-reconstructed",
-        "basis": "issued_shares" if issued else ("ccass_intermediaries" if log else "visible_rows"),
-        "issued_shares": issued,
+        "basis": ("issued_shares" if issued else ("issued_shares_stale" if issued_stale else
+                 ("ccass_intermediaries" if log else "visible_rows"))),
+        "issued_shares": raw_issued,
+        "issued_stale": issued_stale,
         "ccass_total": ccass_total,
         "percentage_base": base,
         "total_participants": len(holders),
