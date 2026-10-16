@@ -90,6 +90,32 @@ def _ffill_close(by_date: dict[str, float], dates: list[str], d: str) -> float |
     i = bisect_right(dates, d) - 1
     return by_date[dates[i]] if i >= 0 else None
 
+def _api_closes(stock_code: str) -> tuple[dict[str, float], list[str]]:
+    """長歷史後備：futu-warrant-api /pz-series 1d×1000 支（覆蓋 ~2022-09 起，
+    補 kline_day.parquet 只滾動 ~282 日＋CCASS quotes 由 2025-12-29 起嘅缺口）。"""
+    import json as _json
+    import urllib.request
+
+    hk = f"HK.{cs.pad_code(stock_code)}"
+    url = f"http://127.0.0.1:8890/pz-series?code={hk}&period=1d&days=1000&delay=15"
+    try:
+        with urllib.request.urlopen(url, timeout=25) as r:
+            data = _json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return {}, []
+    if not data.get("ok"):
+        return {}, []
+    dates: list[str] = []
+    by_date: dict[str, float] = {}
+    for bar in data.get("candles") or []:
+        d = str(bar.get("time", ""))[:10]
+        c = bar.get("c")
+        if not d or c is None or c <= 0:
+            continue
+        dates.append(d)
+        by_date[d] = float(c)
+    return by_date, dates
+
 
 def _valid_iso(s: str | None) -> str | None:
     if not s:
@@ -162,20 +188,25 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
     base = raw_issued if (raw_issued and not issued_stale) else (final_total or None)
 
     by_close, close_dates = _closes(code)
-    price_source = "futu_kline_day" if by_close else None
-    if not by_close:
-        by_close, close_dates = _ccass_quote_closes(issue_id)
-        if by_close:
-            price_source = "ccass_quotes"
-    else:
-        # Futu K 線為主，缺日用 CCASS quotes 補（例如新股／滾動窗前段）
-        q_by, q_dates = _ccass_quote_closes(issue_id)
-        if q_by:
-            merged_dates = sorted(set(close_dates) | set(q_dates))
-            merged: dict[str, float] = dict(q_by)
-            merged.update(by_close)
-            by_close, close_dates = merged, merged_dates
-            price_source = "futu_kline_day+ccass_quotes"
+    q_by, q_dates = _ccass_quote_closes(issue_id)
+    price_parts: list[str] = []
+    if by_close:
+        price_parts.append("futu_kline_day")
+    if q_by:
+        price_parts.append("ccass_quotes")
+    merged: dict[str, float] = dict(q_by)
+    merged_dates = sorted(set(close_dates) | set(q_dates))
+    merged.update(by_close)
+    # 長歷史後備：本地兩個價源都唔夠遠（窗口起點之前）就用 /pz-series 1d×1000 支
+    if (merged_dates and merged_dates[0] > start) or not merged_dates:
+        api_by, api_dates = _api_closes(code)
+        if api_by:
+            price_parts.append("futu_api_1d")
+            for d2, c2 in api_by.items():
+                merged.setdefault(d2, c2)
+            merged_dates = sorted(set(merged_dates) | set(api_dates))
+    by_close, close_dates = merged, merged_dates
+    price_source = "+".join(price_parts) if price_parts else None
 
     items = []
     for part_id, series in by_part.items():
