@@ -290,11 +290,12 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
                     break
             final = series[-1][1]
             delta = final - baseline
-            # 加倉日均價（同 top5 一套加權邏輯）
+            # 加倉日均價（同 top5 一套加權邏輯）＋滾動累計均價序列（畫圖用）
             added_w = 0
             wsum = 0.0
             prev = baseline
             first_add = last_add = None
+            avg_series: list[dict] = []
             for d, h in series:
                 if d < start or d > end:
                     prev = h if d <= end else prev
@@ -309,9 +310,12 @@ def top_adds(stock_code: str, days: int = 365, top_n: int = 5, as_of: str | None
                     if close is not None:
                         added_w += step
                         wsum += step * close
+                        if added_w > 0 and wsum > 0:
+                            avg_series.append({"d": d, "a": round(wsum / added_w, 3)})
             out_items.append({
                 "participant_id": meta.get("ccass_id") or str(part_id),
                 "name": meta.get("name") or f"PARTICIPANT {part_id}",
+                "avg_series": avg_series,
                 "shares_before": baseline,
                 "shares_after": final,
                 "added": delta,
