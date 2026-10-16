@@ -174,18 +174,18 @@ def _headline(results: list[dict], reg: dict, dir_label: str) -> str:
     if clean:
         b = clean[0]
         return (f"{dir_label}：{len(clean)}/{len(results)} 個組合三道閘全過，"
-                f"最好係「{b['strategy']}」期望值 {b['ev_hkd']:+,.0f}、"
-                f"勝率 {b['win_rate']}%。")
+                f"數據較優係「{b['strategy']}」模擬期望值 {b['ev_hkd']:+,.0f}、"
+                f"模擬勝率 {b['win_rate']}%。")
     if warn:
         b = warn[0]
         n_reasons = len(b["verdict"]["blocks"])
-        return (f"{dir_label}：{len(results)} 個組合**冇一個乾淨過閘**。"
-                f"最接近係「{b['strategy']}」（公式期望值 {b['ev_hkd']:+,.0f}、"
-                f"勝率 {b['win_rate']}%），但仲有 {n_reasons} 個保留："
-                f"{b['verdict']['blocks'][0]}。要做就減注。")
+        return (f"{dir_label}：{len(results)} 個組合冇一個乾淨過閘。"
+                f"最接近達標係「{b['strategy']}」（模擬期望值 {b['ev_hkd']:+,.0f}、"
+                f"模擬勝率 {b['win_rate']}%），但仲有 {n_reasons} 個保留："
+                f"{b['verdict']['blocks'][0]}。如要參考，請大幅減注。")
     note = reg.get("note", "") if reg.get("ok") else ""
-    return (f"{dir_label}：今日 {len(results)} 個組合**全部負期望值**，"
-            f"建議唔做（或改方向／等波幅變）。{note}")
+    return (f"{dir_label}：今日 {len(results)} 個組合全部負期望值，"
+            f"冇數據較優組合（可改方向或等波幅變再試）。{note}")
 
 
 def _real_ev_brief(emp: dict | None) -> dict | None:
@@ -240,10 +240,10 @@ def _verdict(r: dict, reg: dict) -> dict:
 
     if not blocks:
         return {"tradeable": True, "level": "ok",
-                "text": f"期望值 {ev:+,.0f}、勝率 {r['win_rate']}%，三道閘全過。",
+                "text": f"模擬期望值 {ev:+,.0f}、模擬勝率 {r['win_rate']}%，三道閘全過。",
                 "blocks": []}
     level = "block" if ev <= 0 else "warn"
-    lead = "唔建議做" if level == "block" else "可做但有保留"
+    lead = "數據未達標" if level == "block" else "數據有保留"
     return {"tradeable": level != "block", "level": level,
             "text": f"{lead}：" + "；".join(blocks), "blocks": blocks}
 

@@ -277,7 +277,7 @@ def do_order(body: dict) -> dict:
     if not legs:
         return {"ok": False, "error": "策略沒有有效交易腿"}
 
-    strategy_name = str(strat.get("strategy") or "三方向期權策略")
+    strategy_name = str(strat.get("strategy") or "三方向期權數據分析")
     expiry = str(strat.get("expiry") or "")
     spec = {
         "title": f"{res.get('name') or code}｜{strategy_name}",
